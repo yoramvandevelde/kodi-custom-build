@@ -8,14 +8,19 @@ upstream's own `docs/README.Android.md`), not copied blind.
 
 ```sh
 sudo apt update
-sudo apt install autoconf bison build-essential curl default-jdk flex \
-  gawk git gperf lib32stdc++6 lib32z1 lib32z1-dev libcurl4-openssl-dev \
+sudo apt install autoconf bison build-essential ccache curl default-jdk \
+  flex gawk git gperf lib32stdc++6 lib32z1 lib32z1-dev libcurl4-openssl-dev \
   unzip zip zlib1g-dev rsync
 ```
 
 `rsync` isn't part of upstream Kodi's own prerequisites -- it's needed by
 this project's `build-kodi.sh`, which syncs the source tree onto tmpfs on
 every build (see the comments at the top of that script for why).
+
+`ccache` isn't strictly required either, but `tools/depends/configure.ac`
+auto-detects and uses it whenever it's on `PATH` (on by default, no flag
+needed), and `build-kodi.sh` already points `CCACHE_DIR` at the persistent
+tmpfs cache -- skip it only if you don't want that.
 
 > [!NOTE]
 > On a 32-bit host, drop `lib32stdc++6 lib32z1 lib32z1-dev`.
