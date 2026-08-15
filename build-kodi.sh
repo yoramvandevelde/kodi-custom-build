@@ -72,8 +72,11 @@ CCACHE_DIR="$RAMDIR/ccache"                    # persistent compiler cache, also
 
 # These two stay on real disk on purpose: read-only/static, get OS page-cached
 # after the first read anyway, so ramdisk-ing them would only cost budget.
-NDK_SDK="/opt/android-tools/android-sdk-linux"
-TARBALLS="/opt/android-tools/xbmc-tarballs"
+# Default under $HOME so no sudo/chown is needed on a clean machine (see
+# PREREQUISITES.md's note on why /opt is best avoided here); override either
+# if you installed the SDK/NDK elsewhere.
+NDK_SDK="${NDK_SDK:-$HOME/android-tools/android-sdk-linux}"
+TARBALLS="${TARBALLS:-$HOME/android-tools/xbmc-tarballs}"
 
 SOURCE_REPO="${SOURCE_REPO:-/home/yoram/kodi}" # local repo we clone from -- no network needed.
                                                 # Overridable so install.sh can point this at a

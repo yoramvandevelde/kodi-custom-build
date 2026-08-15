@@ -73,16 +73,19 @@ keytool -genkey -keystore ~/.android/debug.keystore -v \
 If it prints a "already exists" error, that's fine -- it means this step is
 already done.
 
-## 4. Point build-kodi.sh at your SDK/NDK path
+## 4. (Optional) SDK/NDK/tarballs path
 
-`build-kodi.sh` hardcodes `NDK_SDK`. If you installed to
-`$HOME/android-tools/android-sdk-linux` as recommended in step 2, update it:
+`build-kodi.sh` defaults `NDK_SDK` to `$HOME/android-tools/android-sdk-linux`
+and `TARBALLS` (the depends download cache) to
+`$HOME/android-tools/xbmc-tarballs` -- matching step 2, no sudo needed for
+either. Only override if you installed the SDK/NDK somewhere else:
 
 ```sh
-sed -i 's#^NDK_SDK=.*#NDK_SDK="$HOME/android-tools/android-sdk-linux"#' build-kodi.sh
+NDK_SDK=/path/to/sdk TARBALLS=/path/to/tarballs ./build-kodi.sh
 ```
 
-or just edit the `NDK_SDK=` line near the top of `build-kodi.sh` by hand.
+or edit the `NDK_SDK=` / `TARBALLS=` lines near the top of `build-kodi.sh`
+by hand.
 
 ## 5. (Optional) tmpfs build cache
 
