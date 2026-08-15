@@ -72,6 +72,9 @@ Two patches so far:
 
 ## Usage
 
+First time on a machine? See [PREREQUISITES.md](PREREQUISITES.md) (system
+packages, Android SDK/NDK, debug keystore) before the below.
+
 ```sh
 cp scripts/kodi-env.sh.example scripts/kodi-env.sh
 $EDITOR scripts/kodi-env.sh          # fill in real values

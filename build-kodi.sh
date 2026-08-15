@@ -79,6 +79,14 @@ SOURCE_REPO="${SOURCE_REPO:-/home/yoram/kodi}" # local repo we clone from -- no 
                                                 # Overridable so install.sh can point this at a
                                                 # fresh, patched xbmc/xbmc checkout instead of this
                                                 # machine's personal scratch clone.
+if [ ! -d "$SOURCE_REPO/.git" ]; then
+  echo "SOURCE_REPO ($SOURCE_REPO) is not a git checkout." >&2
+  echo "Either run this via install.sh (which points SOURCE_REPO at a fresh," >&2
+  echo "patched xbmc/xbmc clone automatically), or, for the fast local" >&2
+  echo "edit-build-flash loop, put a working checkout at $SOURCE_REPO yourself" >&2
+  echo "(or override with SOURCE_REPO=/path/to/checkout ./build-kodi.sh)." >&2
+  exit 1
+fi
 JOBS=$(( $(nproc) - 1 ))                       # leave one core free for the rest of the system
 
 # No system cmake is installed on purpose -- tools/depends/native builds its
