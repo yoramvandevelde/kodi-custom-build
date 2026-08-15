@@ -44,6 +44,16 @@ the drift.
   `sources.xml` / `mediasources.xml` are written only if missing, i.e.
   seeded once on first boot: sources you add later through Kodi's own GUI
   have to survive a rebuild or update, not get silently wiped by one.
+- **Accepted risk: a wrong seed value only self-corrects via a fresh
+  install.** `sources.xml`/`mediasources.xml` are seed-once by design (see
+  above), so a wrong value in that first build (a typo, a wrong URL scheme)
+  doesn't get fixed by a later APK update, Splash.java won't touch a file
+  that already exists. That's not a gap to close: "fix a bad out-of-the-box
+  config" and "put a fresh, correct install on the device" are the same
+  action for a build whose entire purpose is exactly that, and adding a way
+  to force-overwrite would undo the protection this write-once policy
+  exists for in the first place. Wipe the app, run the (now-fixed) build
+  again.
 
 ## What changed, concretely
 
