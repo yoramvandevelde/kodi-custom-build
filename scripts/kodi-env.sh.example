@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Copy this file to kodi-env.sh (gitignored, never committed) and fill in
+# real values. Then, before running install.sh or build-kodi.sh:
+#   source scripts/kodi-env.sh
+#
+# CMake fails hard at configure time if any of the KODI_* values below are
+# left unset -- this build's only purpose is delivering this config, so an
+# unset value should never silently produce a working-looking APK.
+
+export ARCH=                    # arm64 (default, 64-bit devices) or armv7a
+                                 # (32-bit-only devices)
+
+# MySQL video/music library config, baked into advancedsettings.xml.
+export KODI_DB_HOST=
+export KODI_DB_PORT=
+export KODI_DB_USER=
+export KODI_DB_PASS=
+
+# Webdav source, seeded into sources.xml / mediasources.xml on first boot
+# only (not overwritten on later starts -- see patches/0002-...).
+export KODI_WEBDAV_SOURCE_URL=

@@ -1,0 +1,284 @@
+From e91e33136a12552b980c0cfdf11d9376730b8b16 Mon Sep 17 00:00:00 2001
+From: Yoram <yoram@sifft.io>
+Date: Sat, 15 Aug 2026 17:50:33 +0000
+Subject: [PATCH 2/2] android: bake per-device userdata config into the APK on
+ first boot
+
+This build's only purpose is delivering a working, ready-to-use install to
+one specific device -- previously that meant manually browsing to a file
+server via the on-device file manager after every clean install/reinstall
+to drop advancedsettings.xml into place by hand.
+
+Three userdata files are now templated (.in, values from required env vars,
+CMake configure fails hard if any are unset), bundled as Android assets via
+the existing add_bundle_file mechanism, and synced from there into the
+actual profile directory by a new step in Splash.java (before Main/native
+loads and reads them):
+
+- advancedsettings.xml (MySQL video/music library config): refreshed on
+  every start, unconditionally. The repo, not whatever's on disk, is the
+  source of truth for this file -- it's not meaningfully hand-edited
+  on-device.
+- mediasources.xml / sources.xml (a webdav source): written only if
+  missing, i.e. seeded once. Sources added later through Kodi's own GUI
+  must survive a rebuild/update, not get silently wiped by one.
+
+Written via a temp file + atomic rename so an interrupted boot never leaves
+a truncated file behind.
+---
+ cmake/scripts/android/Install.cmake           |  35 ++++++
+ .../android/packaging/xbmc/src/Splash.java.in | 103 ++++++++++++++++++
+ userdata/advancedsettings.xml.in              |  16 +++
+ userdata/mediasources.xml.in                  |   5 +
+ userdata/sources.xml.in                       |  30 +++++
+ 5 files changed, 189 insertions(+)
+ create mode 100644 userdata/advancedsettings.xml.in
+ create mode 100644 userdata/mediasources.xml.in
+ create mode 100644 userdata/sources.xml.in
+
+diff --git a/cmake/scripts/android/Install.cmake b/cmake/scripts/android/Install.cmake
+index 3044a9b22e..1c804cb8f4 100644
+--- a/cmake/scripts/android/Install.cmake
++++ b/cmake/scripts/android/Install.cmake
+@@ -149,6 +149,41 @@ if(TARGET ${APP_NAME_LC}::Shairplay)
+   set(SHAIRPLAY_OBJ "libshairplay.so")
+ endif()
+ 
++# Bake this device's MySQL video/music library config into advancedsettings.xml
++# and bundle it as an APK asset. This build's only purpose is delivering that
++# config, so an unset value is a hard configure-time failure, not a silently
++# broken APK.
++foreach(dbvar KODI_DB_HOST KODI_DB_PORT KODI_DB_USER KODI_DB_PASS)
++  if(NOT DEFINED ENV{${dbvar}} OR "$ENV{${dbvar}}" STREQUAL "")
++    message(FATAL_ERROR "${dbvar} is not set in the environment. This build "
++                         "exists solely to bake in the MySQL library config; "
++                         "set KODI_DB_HOST, KODI_DB_PORT, KODI_DB_USER and "
++                         "KODI_DB_PASS before configuring.")
++  endif()
++  set(${dbvar} $ENV{${dbvar}})
++endforeach()
++configure_file(${CMAKE_SOURCE_DIR}/userdata/advancedsettings.xml.in
++               ${CMAKE_BINARY_DIR}/userdata/advancedsettings.xml @ONLY)
++add_bundle_file(${CMAKE_BINARY_DIR}/userdata/advancedsettings.xml
++                ${datarootdir}/${APP_NAME_LC} ${CMAKE_BINARY_DIR})
++
++# Same idea for the seed sources.xml / mediasources.xml (unlike
++# advancedsettings.xml, these are only written on-device if missing -- see
++# Splash.java.in -- since sources added later through Kodi's own GUI must
++# survive a rebuild/update, not get overwritten by it every start.
++if(NOT DEFINED ENV{KODI_WEBDAV_SOURCE_URL} OR "$ENV{KODI_WEBDAV_SOURCE_URL}" STREQUAL "")
++  message(FATAL_ERROR "KODI_WEBDAV_SOURCE_URL is not set in the environment. "
++                       "This build exists solely to bake in this config; set "
++                       "it before configuring.")
++endif()
++set(KODI_WEBDAV_SOURCE_URL $ENV{KODI_WEBDAV_SOURCE_URL})
++foreach(seedfile mediasources.xml sources.xml)
++  configure_file(${CMAKE_SOURCE_DIR}/userdata/${seedfile}.in
++                 ${CMAKE_BINARY_DIR}/userdata/${seedfile} @ONLY)
++  add_bundle_file(${CMAKE_BINARY_DIR}/userdata/${seedfile}
++                  ${datarootdir}/${APP_NAME_LC} ${CMAKE_BINARY_DIR})
++endforeach()
++
+ # Main targets from Makefile.in
+ if(CPU MATCHES i686)
+   set(CPU x86)
+diff --git a/tools/android/packaging/xbmc/src/Splash.java.in b/tools/android/packaging/xbmc/src/Splash.java.in
+index 6ecf4adb0d..88b7cccb09 100644
+--- a/tools/android/packaging/xbmc/src/Splash.java.in
++++ b/tools/android/packaging/xbmc/src/Splash.java.in
+@@ -29,6 +29,7 @@ import android.widget.ProgressBar;
+ import android.widget.TextView;
+ 
+ import java.io.File;
++import java.io.FileInputStream;
+ import java.io.FileNotFoundException;
+ import java.io.FileOutputStream;
+ import java.io.InputStream;
+@@ -662,6 +663,14 @@ public class Splash extends Activity
+ 
+   protected void startXBMC()
+   {
++    // fXbmcHome is only null when we got here via the "Main is already
++    // running, just re-activate it" early return in onCreate() -- in that
++    // case native already read the userdata seed files earlier this process
++    // lifetime, so refreshing the on-disk copies now couldn't take effect
++    // until the next real cold start anyway.
++    if (fXbmcHome != null)
++      syncSeedUserdataFiles();
++
+     // Run @APP_NAME@
+     Intent intent = getIntent();
+     intent.setClass(this, @APP_PACKAGE@.Main.class);
+@@ -670,6 +679,100 @@ public class Splash extends Activity
+     finish();
+   }
+ 
++  /**
++   * This build exists solely to deliver device-specific config (MySQL video/
++   * music library config, a webdav source); see kodi-build-TODO.md. The APK
++   * bundles each as a read-only asset (unpacked by FillCache into
++   * fXbmcHome/assets/userdata/), but Kodi only ever reads these from the
++   * writable profile directory, which nothing else populates from that
++   * asset. So copy each into place here, before Main (native) loads and
++   * reads them.
++   *
++   * Two different policies, per file:
++   * - advancedsettings.xml: refreshed on every start, unconditionally -- the
++   *   repo, not whatever's on disk, is the source of truth. This file is
++   *   never meaningfully edited on-device.
++   * - mediasources.xml / sources.xml: written only if missing, i.e. seeded
++   *   once on first run. Sources added later through Kodi's own GUI must
++   *   survive a rebuild/update, not get silently wiped by one.
++   */
++  private void syncSeedUserdataFiles()
++  {
++    syncSeedUserdataFile("advancedsettings.xml", true);
++    syncSeedUserdataFile("mediasources.xml", false);
++    syncSeedUserdataFile("sources.xml", false);
++  }
++
++  /**
++   * Copies a single bundled userdata seed file into the writable profile
++   * directory. Written via a temp file + atomic rename so a boot that gets
++   * interrupted mid-write never leaves a truncated file for Kodi to read.
++   *
++   * @param name            filename under userdata/, both bundled and target
++   * @param alwaysOverwrite true to refresh on every call; false to only
++   *                        write when the destination doesn't exist yet
++   */
++  private void syncSeedUserdataFile(String name, boolean alwaysOverwrite)
++  {
++    File src = new File(fXbmcHome, "assets/userdata/" + name);
++    if (!src.exists())
++    {
++      Log.w(TAG, "Bundled " + name + " missing at " + src);
++      return;
++    }
++
++    File destDir = getUserdataDir();
++    destDir.mkdirs();
++    File dest = new File(destDir, name);
++    if (!alwaysOverwrite && dest.exists())
++      return;
++
++    File tmp = new File(destDir, name + ".tmp");
++    try (InputStream in = new FileInputStream(src);
++         FileOutputStream out = new FileOutputStream(tmp))
++    {
++      byte[] buf = new byte[4096];
++      int n;
++      while ((n = in.read(buf)) > 0)
++        out.write(buf, 0, n);
++      out.getFD().sync();
++    }
++    catch (IOException e)
++    {
++      Log.e(TAG, "Failed writing " + name + ": " + e.getMessage());
++      tmp.delete();
++      return;
++    }
++
++    if (!tmp.renameTo(dest))
++      Log.e(TAG, "Failed to atomically install " + name);
++    else
++      Log.i(TAG, "Installed " + name + " at " + dest);
++  }
++
++  /**
++   * special://profile (userdata) for the master profile. special://home is
++   * $HOME/.<lowercased appname> (SettingsComponent.cpp's dotLowerAppName),
++   * not $HOME itself -- getExternalFilesDir()/xbmc.data is the "envhome"
++   * level, one above special://home. Missing this ".@APP_NAME_LC@" segment
++   * was a bug that silently wrote advancedsettings.xml one directory too
++   * high the first time this was built.
++   */
++  private File getUserdataDir()
++  {
++    String home = XBMCProperties.getStringProperty("xbmc.data", "");
++    File externalDir;
++    if (!home.isEmpty())
++      externalDir = new File(home);
++    else
++    {
++      externalDir = getExternalFilesDir(null);
++      if (externalDir == null)
++        externalDir = getDir(getPackageName(), MODE_PRIVATE);
++    }
++    return new File(externalDir, ".@APP_NAME_LC@/userdata");
++  }
++
+   @Override
+   public void onCreate(Bundle savedInstanceState)
+   {
+diff --git a/userdata/advancedsettings.xml.in b/userdata/advancedsettings.xml.in
+new file mode 100644
+index 0000000000..d7e78b48c9
+--- /dev/null
++++ b/userdata/advancedsettings.xml.in
+@@ -0,0 +1,16 @@
++<advancedsettings>
++  <videodatabase>
++    <type>mysql</type>
++    <host>@KODI_DB_HOST@</host>
++    <port>@KODI_DB_PORT@</port>
++    <user>@KODI_DB_USER@</user>
++    <pass>@KODI_DB_PASS@</pass>
++  </videodatabase>
++  <musicdatabase>
++    <type>mysql</type>
++    <host>@KODI_DB_HOST@</host>
++    <port>@KODI_DB_PORT@</port>
++    <user>@KODI_DB_USER@</user>
++    <pass>@KODI_DB_PASS@</pass>
++  </musicdatabase>
++</advancedsettings>
+diff --git a/userdata/mediasources.xml.in b/userdata/mediasources.xml.in
+new file mode 100644
+index 0000000000..0b47c9b5d8
+--- /dev/null
++++ b/userdata/mediasources.xml.in
+@@ -0,0 +1,5 @@
++<mediasources>
++    <network>
++        <location id="0">@KODI_WEBDAV_SOURCE_URL@</location>
++    </network>
++</mediasources>
+diff --git a/userdata/sources.xml.in b/userdata/sources.xml.in
+new file mode 100644
+index 0000000000..c913fe57c1
+--- /dev/null
++++ b/userdata/sources.xml.in
+@@ -0,0 +1,30 @@
++<sources>
++    <programs>
++        <default pathversion="1"></default>
++    </programs>
++    <video>
++        <default pathversion="1"></default>
++        <source>
++            <name>k0.0.0.0</name>
++            <path pathversion="1">@KODI_WEBDAV_SOURCE_URL@</path>
++            <allowsharing>true</allowsharing>
++        </source>
++    </video>
++    <music>
++        <default pathversion="1"></default>
++    </music>
++    <pictures>
++        <default pathversion="1"></default>
++    </pictures>
++    <files>
++        <default pathversion="1"></default>
++        <source>
++            <name>profile</name>
++            <path pathversion="1">special://profile/</path>
++            <allowsharing>true</allowsharing>
++        </source>
++    </files>
++    <games>
++        <default pathversion="1"></default>
++    </games>
++</sources>
+-- 
+2.53.0
+
