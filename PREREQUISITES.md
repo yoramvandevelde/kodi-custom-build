@@ -1,8 +1,20 @@
 # Prerequisites
 
 Steps to prepare a clean machine before running `install.sh`. Verified
-against what this project's Kodi fork actually needs (cross-checked with
-upstream's own `docs/README.Android.md`), not copied blind.
+against what this project's Kodi builds actually need (cross-checked with
+upstream's own `docs/README.Android.md` for each target), not copied blind.
+
+There are two build targets and **they need different Android toolchains**.
+Step 2 below is therefore split. Everything else is shared.
+
+| | `omega` (21.3-Omega release) | `master` (pinned xbmc/xbmc master) |
+|---|---|---|
+| NDK | r21e (`21.4.7075529`) | r28c (`28.2.13676358`) |
+| ndk-api | 21 | 24 |
+| SDK platform | android-34 | android-37.0 |
+| build-tools | 33.0.1 | 37.0.0 |
+| SDK root | `$HOME/android-tools-omega/` | `$HOME/android-tools/` |
+| library schema | `MyVideos131` / `MyMusic83` | `MyVideos148` / `MyMusic84` |
 
 ## 1. System packages
 
@@ -14,12 +26,12 @@ sudo apt install autoconf bison build-essential ccache curl default-jdk \
 ```
 
 `rsync` isn't part of upstream Kodi's own prerequisites -- it's needed by
-this project's `build-kodi.sh`, which syncs the source tree onto tmpfs on
-every build (see the comments at the top of that script for why).
+this project's `build-kodi.sh` scripts, which sync the source tree onto tmpfs
+on every build (see the comments at the top of either script for why).
 
 `ccache` isn't strictly required either, but `tools/depends/configure.ac`
 auto-detects and uses it whenever it's on `PATH` (on by default, no flag
-needed), and `build-kodi.sh` already points `CCACHE_DIR` at the persistent
+needed), and both build scripts already point `CCACHE_DIR` at the persistent
 tmpfs cache -- skip it only if you don't want that.
 
 > [!NOTE]
@@ -33,20 +45,50 @@ If it's older, install a newer JDK and point `JAVA_HOME` at it.
 
 ## 2. Android SDK + NDK
 
-This is not an apt package -- download and extract it by hand. This build
-uses NDK r28c (28.2.13676358); the SDK build-tools/platform versions below
-match what this project currently targets.
+Not an apt package -- download and extract by hand. Download "Command line
+tools only" from [developer.android.com/studio](https://developer.android.com/studio)
+(the filename includes a build number that changes over time, adjust below).
+
+> [!IMPORTANT]
+> The two targets get **separate SDK roots**, and that is deliberate.
+> `tools/depends/configure.ac` picks build-tools with
+> `ls $sdk/build-tools | sort -V | tail -n 1`, i.e. always the newest one
+> installed, with no way to ask for an older one. Putting both targets'
+> build-tools in one root would silently hand the omega build master's
+> 37.0.0 no matter what any doc says. Two roots removes the ambiguity
+> instead of trying to outsmart that sort order.
+
+### 2a. For the `omega` target (21.3-Omega)
+
+```sh
+mkdir -p "$HOME/android-tools-omega/android-sdk-linux"
+unzip commandlinetools-linux-*.zip -d "$HOME/android-tools-omega/android-sdk-linux/"
+
+cd "$HOME/android-tools-omega/android-sdk-linux/cmdline-tools/bin"
+./sdkmanager --sdk_root="$(pwd)/../.." --licenses
+./sdkmanager --sdk_root="$(pwd)/../.." platform-tools
+./sdkmanager --sdk_root="$(pwd)/../.." "platforms;android-34"
+./sdkmanager --sdk_root="$(pwd)/../.." "build-tools;33.0.1"
+./sdkmanager --sdk_root="$(pwd)/../.." "ndk;21.4.7075529"
+```
+
+Why these exact versions:
+
+- **platform android-34** is not a floor, it's the value.
+  `cmake/platform/android/android.cmake` in 21.3 hardcodes `TARGET_SDK 34`,
+  which becomes gradle's `compileSdk`/`targetSdk`. A newer platform installed
+  instead does not substitute for it.
+- **NDK r21e** is what Kodi's own `docs/README.Android.md` recommends for
+  this release ("CI/CD platforms currently use r21e for build testing and
+  releases"). `omega/build-kodi.sh` passes it explicitly via
+  `--with-ndk-path`, which 21.3 **requires** -- unlike master, its configure
+  has no NDK auto-detection and hard-errors with "NDK path is required for
+  android" without it.
+
+### 2b. For the `master` target
 
 ```sh
 mkdir -p "$HOME/android-tools/android-sdk-linux"
-```
-
-Download "Command line tools only" from
-[developer.android.com/studio](https://developer.android.com/studio) (the
-filename includes a build number that changes over time -- adjust below),
-then:
-
-```sh
 unzip commandlinetools-linux-*.zip -d "$HOME/android-tools/android-sdk-linux/"
 
 cd "$HOME/android-tools/android-sdk-linux/cmdline-tools/bin"
@@ -58,15 +100,16 @@ cd "$HOME/android-tools/android-sdk-linux/cmdline-tools/bin"
 ```
 
 > [!TIP]
-> `$HOME/android-tools` needs no `sudo` at all. (An earlier machine used
-> `/opt/android-tools` instead, which is root-owned and needs `sudo` just to
-> create the directory -- avoid that unless you have a reason for it.)
+> Neither path needs `sudo`. (An earlier machine used `/opt/android-tools`
+> instead, which is root-owned and needs `sudo` just to create the directory
+> -- avoid that unless you have a reason for it.)
 
 ## 3. Debug signing keystore
 
-This is a personal sideload build, so it reuses the debug keystore for
-release signing too (see `build-kodi.sh`'s `KODI_ANDROID_*` defaults).
-Generate one if `~/.android/debug.keystore` doesn't already exist:
+Shared by both targets. This is a personal sideload build, so it reuses the
+debug keystore for release signing too (see either `build-kodi.sh`'s
+`KODI_ANDROID_*` defaults). Generate one if `~/.android/debug.keystore`
+doesn't already exist:
 
 ```sh
 keytool -genkey -keystore ~/.android/debug.keystore -v \
@@ -75,29 +118,43 @@ keytool -genkey -keystore ~/.android/debug.keystore -v \
   -validity 10000
 ```
 
-If it prints a "already exists" error, that's fine -- it means this step is
+If it prints an "already exists" error, that's fine -- it means this step is
 already done.
 
-## 4. (Optional) SDK/NDK/tarballs path
+## 4. (Optional) SDK/NDK/tarballs paths
 
-`build-kodi.sh` defaults `NDK_SDK` to `$HOME/android-tools/android-sdk-linux`
-and `TARBALLS` (the depends download cache) to
-`$HOME/android-tools/xbmc-tarballs` -- matching step 2, no sudo needed for
-either. Only override if you installed the SDK/NDK somewhere else:
+Each `build-kodi.sh` defaults `NDK_SDK` to its own root (step 2a/2b) and both
+share `TARBALLS` at `$HOME/android-tools/xbmc-tarballs`. Sharing the tarball
+cache is safe: it's purely a download cache of upstream dependency tarballs
+keyed by filename+version, so two Kodi versions wanting different dependency
+versions just means both sets live there.
+
+Only override if you installed things elsewhere:
 
 ```sh
-NDK_SDK=/path/to/sdk TARBALLS=/path/to/tarballs ./build-kodi.sh
+NDK_SDK=/path/to/sdk TARBALLS=/path/to/tarballs ./omega/build-kodi.sh
 ```
 
-or edit the `NDK_SDK=` / `TARBALLS=` lines near the top of `build-kodi.sh`
-by hand.
+`omega/build-kodi.sh` additionally accepts `NDK_VERSION` / `NDK_PATH` if your
+NDK isn't at `$NDK_SDK/ndk/21.4.7075529`.
 
 ## 5. (Optional) tmpfs build cache
 
 `scripts/restore-buildcache.sh` mounts a tmpfs and needs root to do so
-(`mount`). If you don't want a RAM-backed build (slower, but no root
-needed and no RAM budget to plan around), skip it and adjust `RAMDIR` in
-`build-kodi.sh` to point at a plain directory on disk instead.
+(`mount`). If you don't want a RAM-backed build (slower, but no root needed
+and no RAM budget to plan around), skip it and adjust `RAMDIR` in the
+relevant `build-kodi.sh` to point at a plain directory on disk instead.
+
+The ramdisk holds **one target at a time**, with a separate backup dir per
+target (`/home/yoram/build-cache-backup-{omega,master}`). Switching targets:
+
+```sh
+./scripts/save-buildcache.sh master      # checkpoint what's there now
+./scripts/restore-buildcache.sh omega    # swap in the other target
+```
+
+`restore-buildcache.sh` writes a `.buildcache-target` stamp into the ramdisk
+and will warn before overwriting a target you haven't saved.
 
 ## Next
 
@@ -107,6 +164,6 @@ With all of the above done:
 cp scripts/kodi-env.sh.example scripts/kodi-env.sh
 $EDITOR scripts/kodi-env.sh
 source scripts/kodi-env.sh
-./scripts/restore-buildcache.sh   # only if using the tmpfs cache from step 5
-./install.sh
+./scripts/restore-buildcache.sh omega   # only if using the tmpfs cache from step 5
+./install.sh omega
 ```

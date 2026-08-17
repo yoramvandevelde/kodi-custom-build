@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 # Copy this file to kodi-env.sh (gitignored, never committed) and fill in
-# real values. Then, before running install.sh or build-kodi.sh:
+# real values. Then, before running install.sh or <target>/build-kodi.sh:
 #   source scripts/kodi-env.sh
+#
+# Shared by BOTH build targets (omega and master) on purpose: the device,
+# its credentials and its media source are the same regardless of which Kodi
+# version you build. Only the Android toolchain paths differ between targets,
+# and those live as defaults inside each <target>/build-kodi.sh.
 #
 # CMake fails hard at configure time if any of the KODI_* values below are
 # left unset -- this build's only purpose is delivering this config, so an

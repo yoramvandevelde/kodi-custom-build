@@ -1,0 +1,80 @@
+From 32d4e0ec1563af8392dec68697065fd3a2c859da Mon Sep 17 00:00:00 2001
+From: Yoram <yoram@sifft.io>
+Date: Sat, 15 Aug 2026 17:50:08 +0000
+Subject: [PATCH 1/2] android: package libshairplay.so conditionally on
+ ENABLE_AIRTUNES
+
+Previously OBJS in the packaging Makefile hardcoded libshairplay.so
+unconditionally, even when ENABLE_AIRTUNES=OFF and the target isn't built.
+Install.cmake now only adds it (and passes SHAIRPLAY_OBJ through to the
+Makefile) when the Shairplay target actually exists; the Makefile's libs
+step also tolerates an empty SRCLIBS instead of failing.
+
+Also passes APP_PACKAGE through to CompileInfo.cpp generation, needed by
+CCompileInfo::GetPackage() matching the configured package id.
+---
+ CMakeLists.txt                      | 1 +
+ cmake/scripts/android/Install.cmake | 3 +++
+ tools/android/packaging/Makefile.in | 4 ++--
+ 3 files changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index eb648e9a27..0dc5182fb2 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -310,6 +310,7 @@ add_custom_command(OUTPUT ${CORE_BUILD_DIR}/xbmc/CompileInfo.cpp
+                                             -DCORE_BUILD_DIR=${CORE_BUILD_DIR}
+                                             -DCMAKE_BINARY_DIR=${CMAKE_BINARY_DIR}
+                                             -DARCH_DEFINES="${ARCH_DEFINES}"
++                                            -DAPP_PACKAGE=${APP_PACKAGE}
+                                             -DAPP_SCMID=${APP_SCMID}
+                                             -DAPP_COPYRIGHT_YEARS=${APP_COPYRIGHT_YEARS}
+                                             -DAPP_BUILD_DATE=${APP_BUILD_DATE}
+diff --git a/cmake/scripts/android/Install.cmake b/cmake/scripts/android/Install.cmake
+index b912141007..2a0bf8872e 100644
+--- a/cmake/scripts/android/Install.cmake
++++ b/cmake/scripts/android/Install.cmake
+@@ -141,8 +141,10 @@ foreach(library IN LISTS LIBRARY_FILES)
+   add_bundle_file(${library} ${libdir}/${APP_NAME_LC} ${CMAKE_BINARY_DIR})
+ endforeach()
+ 
++set(SHAIRPLAY_OBJ "")
+ if(TARGET Shairplay::Shairplay)
+   add_bundle_file(Shairplay::Shairplay ${libdir} "")
++  set(SHAIRPLAY_OBJ "libshairplay.so")
+ endif()
+ 
+ # Main targets from Makefile.in
+@@ -163,6 +165,7 @@ foreach(target apk apk-clean)
+               NDKROOT=${NDKROOT}
+               SDKROOT=${SDKROOT}
+               STRIP=${CMAKE_STRIP}
++              SHAIRPLAY_OBJ=${SHAIRPLAY_OBJ}
+               ${target}
+       WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/tools/android/packaging
+       VERBATIM
+diff --git a/tools/android/packaging/Makefile.in b/tools/android/packaging/Makefile.in
+index 98a15226a8..260d2df2f5 100644
+--- a/tools/android/packaging/Makefile.in
++++ b/tools/android/packaging/Makefile.in
+@@ -3,7 +3,7 @@ include ../../depends/Makefile.include
+ BUILD_TYPE:=@CMAKE_BUILD_TYPE@
+ BUILD_TYPE_LC:=$(shell echo $(BUILD_TYPE) | tr A-Z a-z)
+ 
+-OBJS = libshairplay.so
++OBJS = $(SHAIRPLAY_OBJ)
+ 
+ EXCLUDED_ADDONS =
+ 
+@@ -78,7 +78,7 @@ res:
+ libs: $(PREFIX)/lib/@APP_NAME_LC@/lib@APP_NAME_LC@.so
+ 	rm -rf xbmc/lib/$(CPU) xbmc/obj/local/$(CPU)
+ 	mkdir -p xbmc/lib/$(CPU) xbmc/assets/python@PYTHON_VERSION@/lib/ xbmc/obj/local/$(CPU)
+-	cp -fpL $(SRCLIBS) xbmc/obj/local/$(CPU)/
++	$(if $(SRCLIBS),cp -fpL $(SRCLIBS) xbmc/obj/local/$(CPU)/,true)
+ 	cp -fp $(PREFIX)/lib/@APP_NAME_LC@/lib@APP_NAME_LC@.so xbmc/obj/local/$(CPU)/
+ 	(test -d $(PREFIX)/lib/@APP_NAME_LC@/addons && \
+ 	  find $(PREFIX)/lib/@APP_NAME_LC@/addons -name "*.so" -exec cp -fp {} xbmc/obj/local/$(CPU)/ \;) || true
+-- 
+2.55.0
+

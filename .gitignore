@@ -1,5 +1,9 @@
 # Personal, filled-in config -- never commit real credentials/URLs.
 scripts/kodi-env.sh
 
-# Default clone target for install.sh.
+# Default clone targets for install.sh (one per build target).
+/xbmc-omega/
+/xbmc-master/
+
+# Pre-split clone dir, from before install.sh took a target argument.
 /xbmc/
