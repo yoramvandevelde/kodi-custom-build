@@ -60,6 +60,22 @@ tools only" from [developer.android.com/studio](https://developer.android.com/st
 
 ### 2a. For the `omega` target (21.3-Omega)
 
+If you already set up the `master` root (2b), reuse its `sdkmanager` rather
+than downloading the zip again: `--sdk_root` controls where packages are
+installed, so one sdkmanager can populate any number of roots.
+
+```sh
+OMEGA="$HOME/android-tools-omega/android-sdk-linux"
+mkdir -p "$OMEGA"
+cd "$HOME/android-tools/android-sdk-linux/cmdline-tools/bin"
+
+./sdkmanager --sdk_root="$OMEGA" --licenses
+./sdkmanager --sdk_root="$OMEGA" "cmdline-tools;latest" platform-tools \
+  "platforms;android-34" "build-tools;33.0.1" "ndk;21.4.7075529"
+```
+
+Otherwise, starting from the downloaded zip:
+
 ```sh
 mkdir -p "$HOME/android-tools-omega/android-sdk-linux"
 unzip commandlinetools-linux-*.zip -d "$HOME/android-tools-omega/android-sdk-linux/"
@@ -71,6 +87,15 @@ cd "$HOME/android-tools-omega/android-sdk-linux/cmdline-tools/bin"
 ./sdkmanager --sdk_root="$(pwd)/../.." "build-tools;33.0.1"
 ./sdkmanager --sdk_root="$(pwd)/../.." "ndk;21.4.7075529"
 ```
+
+> [!IMPORTANT]
+> `"cmdline-tools;latest"` in the reuse route is not optional.
+> `tools/depends/configure.ac` (line 578) requires an `sdkmanager` inside
+> the SDK root being used, at `tools/bin/`, `cmdline-tools/bin/` or
+> `cmdline-tools/latest/bin/`. Populating a root with another root's
+> sdkmanager gets you the NDK, platforms and build-tools but leaves no
+> cmdline-tools behind, so `./configure` fails on a root that otherwise
+> looks complete. `omega/build-kodi.sh` checks for this up front.
 
 Why these exact versions:
 

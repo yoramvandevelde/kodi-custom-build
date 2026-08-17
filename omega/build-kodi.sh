@@ -135,6 +135,23 @@ if [ ! -f "$NDK_PATH/source.properties" ] && [ ! -f "$NDK_PATH/RELEASE.TXT" ]; t
   echo "override with NDK_VERSION=... / NDK_PATH=..." >&2
   exit 1
 fi
+# configure.ac wants an sdkmanager inside the sdk root itself, at one of three
+# fixed paths. Easy to miss when populating a second root: installing packages
+# into it with ANOTHER root's sdkmanager (--sdk_root=...) works fine and gets
+# you the ndk/platforms/build-tools, but leaves no cmdline-tools behind here,
+# so ./configure fails later on a root that looks complete. Install
+# "cmdline-tools;latest" into this root too.
+if [ ! -f "$NDK_SDK/tools/bin/sdkmanager" ] \
+   && [ ! -f "$NDK_SDK/cmdline-tools/bin/sdkmanager" ] \
+   && [ ! -f "$NDK_SDK/cmdline-tools/latest/bin/sdkmanager" ]; then
+  echo "No sdkmanager found in $NDK_SDK." >&2
+  echo "tools/depends/configure.ac requires one at tools/bin/sdkmanager," >&2
+  echo "cmdline-tools/bin/sdkmanager or cmdline-tools/latest/bin/sdkmanager." >&2
+  echo "Populating this root with another sdk root's sdkmanager does not put" >&2
+  echo "one here; add it with:" >&2
+  echo "  sdkmanager --sdk_root=\"$NDK_SDK\" \"cmdline-tools;latest\"" >&2
+  exit 1
+fi
 if [ ! -d "$NDK_SDK/platforms/android-34" ]; then
   echo "Missing $NDK_SDK/platforms/android-34." >&2
   echo "cmake/platform/android/android.cmake in 21.3 hardcodes TARGET_SDK 34," >&2
