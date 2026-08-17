@@ -25,18 +25,22 @@ LOG_KEEP_DIR="/var/log/kodi-scanner"
 # Nothing inside ~/.kodi needs to survive: the library lives in the shared
 # MySQL database, and the artwork cache (Textures13.db + Thumbnails/) is
 # per-instance and never reused, since this container is discarded after each
-# run. Putting the profile on tmpfs keeps that churn out of the container's
-# disk entirely.
+# run. Keeping the profile in RAM avoids writing it only to bin it, and means
+# each run starts from a known-clean state.
 #
-# That churn is not hypothetical and it is not just the log. Once a library
-# exists, Kodi caches artwork for whatever the GUI shows, and the home screen's
-# "recently added" widgets start pulling images the moment the skin loads,
-# without anyone navigating anywhere. On a nightly throwaway container that is
-# thousands of images written and then binned, every night.
+# Filled mainly by the debug log, secondarily by cached artwork: Kodi caches
+# images for whatever the GUI shows, and the home screen widgets start pulling
+# them as soon as the skin loads, with nobody navigating anywhere.
 #
-# Note this is NOT solvable with <videolibrary><artworkLevel>: that controls
-# which artwork URLs get written to the library, and the library is shared, so
-# turning it down here would starve the streamer of artwork too.
+# Worth knowing: the artwork side is NOT something to fix with
+# <videolibrary><artworkLevel>. That controls which artwork URLs get written to
+# the library, and the library is shared, so turning it down here would starve
+# the streamer of artwork too.
+#
+# size= is a limit, not a reservation. If it fills, writes fail with ENOSPC and
+# stop there; it cannot grow into the container's memory. The scan is unaffected
+# either way, since that writes to MySQL over the network, so a full tmpfs costs
+# log fidelity rather than data.
 echo "==> Mounting tmpfs profile at $KODI_HOME/.kodi"
 mkdir -p "$KODI_HOME/.kodi"
 mountpoint -q "$KODI_HOME/.kodi" || mount -t tmpfs -o size=2G tmpfs "$KODI_HOME/.kodi"

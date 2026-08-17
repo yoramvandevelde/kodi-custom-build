@@ -135,19 +135,54 @@ notification cannot be missed however fast the scan runs.
 
 ### Why the profile is on tmpfs
 
-Not primarily for the log. Once a library exists, Kodi caches artwork for
-whatever the GUI displays, and Estuary's home screen widgets start pulling
-images as soon as the skin loads, without anyone navigating anywhere. Artwork
-caches are per-instance and never shared, so on a container that is discarded
-after every run that is thousands of images written and then binned, nightly.
+Everything the profile holds is disposable: the library itself lives in MySQL,
+and the artwork cache (`Textures13.db` + `Thumbnails/`) is per-instance and
+never shared, so a container that is discarded after each run writes it only to
+throw it away. Keeping the profile in RAM avoids that round trip and
+guarantees each run starts from a known-clean state.
 
-This is **not** fixable with `<videolibrary><artworkLevel>`: that controls
-which artwork URLs are written to the library, and the library is shared, so
-turning it down here would starve the streamer of artwork too. Keeping the
-whole profile in RAM sidesteps it without touching what gets stored.
+Two things fill it, in this order:
+
+- **The log.** At `loglevel 1` a full scan logs every directory listing,
+  scraper call and query. Hundreds of MB for a first full scan; far less for a
+  nightly incremental pass. This is the main consumer.
+- **Cached artwork.** Kodi caches images for whatever the GUI displays, and
+  Estuary's home screen widgets start pulling them as soon as the skin loads,
+  with nobody navigating anywhere. On a headless instance sitting on the home
+  screen that is the widget contents, on the order of tens of images, not the
+  whole library.
+
+Worth knowing: this is **not** something to fix with
+`<videolibrary><artworkLevel>`. That controls which artwork URLs are written to
+the library, and the library is shared, so turning it down here would starve
+the streamer of artwork too.
 
 The log is copied out to `/var/log/kodi-scanner/` before poweroff, so a crashed
 run still leaves something to read. Kept for a fortnight.
+
+### Sizing, and what happens if it fills
+
+`size=2G` is a limit, not a reservation: it costs nothing until written to.
+Against a 4G container that leaves comfortable room for Kodi itself, which
+sits somewhere around 0.5-1.5G during a scan of a library this size.
+
+If the tmpfs does fill, writes fail with `ENOSPC` and that is the end of it.
+It cannot grow into the container's memory, which is exactly what the explicit
+`size=` is for; a tmpfs mounted without one would default to half of RAM and
+that warning would be real.
+
+The consequences are mild, because the scan does not write there. The library
+goes to MySQL over the network. A full tmpfs costs a truncated log and some
+uncached artwork, not data. So treat 2G as "how much diagnostics survive a
+heavy run", not as a safety threshold.
+
+These are estimates rather than measurements. After the first run:
+
+```sh
+free -m
+du -sh /home/kodi/.kodi/*
+ls -lh /var/log/kodi-scanner/
+```
 
 ### No watchdog, deliberately
 
