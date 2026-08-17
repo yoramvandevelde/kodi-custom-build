@@ -80,6 +80,23 @@ echo "==> Checking out pinned ref $XBMC_REF"
 git -C "$XBMC_DIR" fetch --tags origin
 git -C "$XBMC_DIR" checkout --detach "$XBMC_REF"
 
+# git am creates commits, so it needs a committer identity, and a freshly
+# installed machine has none configured -- it fails with "Committer identity
+# unknown" before applying anything. Set one, but ONLY in this clone (never
+# --global: this is a disposable build artifact, not a reason to touch the
+# machine's git config), and only when nothing is configured anywhere, so a
+# machine that already has a real identity keeps using it.
+#
+# This identity is the committer, not the author: `git am` preserves each
+# patch's original From: line, so authorship survives regardless of what's
+# set here. Override with GIT_COMMITTER_NAME / GIT_COMMITTER_EMAIL if you
+# want these commits attributed to you instead.
+if ! git -C "$XBMC_DIR" config user.email >/dev/null 2>&1; then
+  echo "==> No git identity configured; setting a local one for this clone"
+  git -C "$XBMC_DIR" config user.name "${GIT_COMMITTER_NAME:-kodi-custom-build}"
+  git -C "$XBMC_DIR" config user.email "${GIT_COMMITTER_EMAIL:-build@localhost}"
+fi
+
 echo "==> Applying patch series from $TARGET_DIR/patches"
 git -C "$XBMC_DIR" am "$TARGET_DIR"/patches/*.patch
 
