@@ -1,0 +1,43 @@
+From 2100e476e8f92ee807c2ad3cf8b86ee2c50515ad Mon Sep 17 00:00:00 2001
+From: Yoram <yoram@sifft.io>
+Date: Mon, 17 Aug 2026 18:30:03 +0200
+Subject: [PATCH] cmake: only require Cdio when ENABLE_OPTICAL is on
+
+ENABLE_OPTICAL=OFF did not actually make optical support optional: Cdio sat
+in the unconditional required_deps list, so configure failed with "Could NOT
+find Cdio" regardless of the option, and the only way to configure at all
+was to build libcdio anyway. The option merely gated the HAS_OPTICAL_DRIVE
+and HAS_CDDA_RIPPER defines.
+
+Move the dependency inside the same ENABLE_OPTICAL block that already guards
+those defines, so the option controls the requirement too.
+
+This is a backport of how upstream master already does it; the fix landed
+after 21.3 was tagged.
+---
+ CMakeLists.txt | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 0dc5182fb2..952dc455ca 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -200,7 +200,6 @@ core_require_dep(${required_buildtools})
+ 
+ # Required dependencies. Keep in alphabetical order please
+ set(required_deps ASS>=0.15.0
+-                  Cdio
+                   CrossGUID
+                   Curl
+                   FFMPEG
+@@ -280,6 +279,7 @@ if(ENABLE_UPNP)
+ endif()
+ 
+ if(ENABLE_OPTICAL)
++  core_require_dep(Cdio>=0.80)
+   list(APPEND DEP_DEFINES -DHAS_OPTICAL_DRIVE -DHAS_CDDA_RIPPER)
+ endif()
+ 
+-- 
+2.55.0
+
