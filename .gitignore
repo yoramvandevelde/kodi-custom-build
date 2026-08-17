@@ -7,3 +7,7 @@ scripts/kodi-env.sh
 
 # Pre-split clone dir, from before install.sh took a target argument.
 /xbmc/
+
+# Byte-compiled addon sources (the addon ships as plain .py).
+__pycache__/
+*.pyc

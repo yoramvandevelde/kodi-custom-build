@@ -1,0 +1,27 @@
+<advancedsettings>
+  <!-- Identical to the streamer's database config (see the userdata templates
+       in omega/patches/0002-*.patch) and it has to stay that way: this is what
+       points the scanner at the same shared library rather than a private one.
+       Resolved from the same env vars, by scanner/provision.sh instead of by
+       CMake. -->
+  <videodatabase>
+    <type>mysql</type>
+    <host>@KODI_DB_HOST@</host>
+    <port>@KODI_DB_PORT@</port>
+    <user>@KODI_DB_USER@</user>
+    <pass>@KODI_DB_PASS@</pass>
+  </videodatabase>
+  <musicdatabase>
+    <type>mysql</type>
+    <host>@KODI_DB_HOST@</host>
+    <port>@KODI_DB_PORT@</port>
+    <user>@KODI_DB_USER@</user>
+    <pass>@KODI_DB_PASS@</pass>
+  </musicdatabase>
+
+  <!-- Debug logging, on purpose and permanently. This box has no screen and
+       no watchdog: when a scan hangs, kodi.log is the only thing that says
+       which path it stopped on. The extra disk churn is irrelevant on a
+       container that lives for the length of one scan. -->
+  <loglevel>1</loglevel>
+</advancedsettings>

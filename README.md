@@ -112,12 +112,26 @@ The two series are not interchangeable: upstream renamed the Shairplay CMake
 target from `Shairplay::Shairplay` to `${APP_NAME_LC}::Shairplay` after 21.3,
 so patch 1 differs between them.
 
+## The scanner
+
+The streamer is a client: it gets started when someone wants to watch
+something, and it cannot be relied on to scan a large WebDAV source in the
+background with the screen off. So library scanning lives in
+[`scanner/`](scanner/README.md): a disposable Alpine container that boots once
+a night, updates and cleans the shared library, and powers itself off.
+
+It builds nothing. It runs stock `apk add kodi`, which is only possible
+because the streamer is on a released Kodi: 21.x speaks `MyVideos131`, so an
+off-the-shelf package can share the library. That was the whole point of
+moving off master.
+
 ## Layout
 
 - `install.sh`: takes a target, clones xbmc/xbmc at that target's pinned ref,
   applies its `patches/`, builds.
 - `omega/`, `master/`: per-target `build-kodi.sh` (depends, cmake, apk) and
   `patches/`.
+- `scanner/`: the nightly library-scanner container. No build, stock package.
 - `scripts/restore-buildcache.sh` / `save-buildcache.sh`: mount/restore and
   save/backup the tmpfs build cache across reboots. Shared, target-aware: the
   ramdisk holds one target at a time with a backup dir per target.

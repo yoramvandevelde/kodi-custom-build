@@ -1,0 +1,30 @@
+<sources>
+    <programs>
+        <default pathversion="1"></default>
+    </programs>
+    <video>
+        <default pathversion="1"></default>
+        <source>
+            <name>k0.0.0.0</name>
+            <path pathversion="1">@KODI_WEBDAV_SOURCE_URL@</path>
+            <allowsharing>true</allowsharing>
+        </source>
+    </video>
+    <music>
+        <default pathversion="1"></default>
+    </music>
+    <pictures>
+        <default pathversion="1"></default>
+    </pictures>
+    <files>
+        <default pathversion="1"></default>
+        <source>
+            <name>profile</name>
+            <path pathversion="1">special://profile/</path>
+            <allowsharing>true</allowsharing>
+        </source>
+    </files>
+    <games>
+        <default pathversion="1"></default>
+    </games>
+</sources>
