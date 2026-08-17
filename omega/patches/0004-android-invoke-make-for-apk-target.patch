@@ -1,0 +1,44 @@
+From dae83ed9822899b9c4db453e83f134b6b2b166d3 Mon Sep 17 00:00:00 2001
+From: Yoram <yoram@sifft.io>
+Date: Mon, 17 Aug 2026 18:44:19 +0200
+Subject: [PATCH] android: invoke make, not CMAKE_MAKE_PROGRAM, for the apk
+ target
+
+The apk and apk-clean targets shell out to tools/android/packaging, which
+is driven by a Makefile generated from Makefile.in. They invoked it with
+${CMAKE_MAKE_PROGRAM}, which is only make when configuring with the "Unix
+Makefiles" generator. With -GNinja, CMAKE_MAKE_PROGRAM is ninja, so ninja
+gets pointed at a directory holding a Makefile and dies with:
+
+  ninja: error: loading 'build.ninja': No such file or directory
+
+The whole build otherwise completes; only packaging fails, at the very
+last step.
+
+Look up make explicitly instead, so the packaging step is independent of
+the generator used for the main build. Backport of what upstream master
+already does.
+---
+ cmake/scripts/android/Install.cmake | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/cmake/scripts/android/Install.cmake b/cmake/scripts/android/Install.cmake
+index f3e8e3b77c..a9c9bf856b 100644
+--- a/cmake/scripts/android/Install.cmake
++++ b/cmake/scripts/android/Install.cmake
+@@ -186,9 +186,11 @@ endforeach()
+ if(CPU MATCHES i686)
+   set(CPU x86)
+ endif()
++find_program(MAKE_EXECUTABLE make REQUIRED)
++
+ foreach(target apk apk-clean)
+   add_custom_target(${target}
+-      COMMAND env PATH=${NATIVEPREFIX}/bin:$ENV{PATH} ${CMAKE_MAKE_PROGRAM} -j1
++      COMMAND env PATH=${NATIVEPREFIX}/bin:$ENV{PATH} ${MAKE_EXECUTABLE} -j1
+               -C ${CMAKE_BINARY_DIR}/tools/android/packaging
+               CMAKE_SOURCE_DIR=${CMAKE_SOURCE_DIR}
+               CC=${CMAKE_C_COMPILER}
+-- 
+2.55.0
+
