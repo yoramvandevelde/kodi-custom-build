@@ -16,6 +16,30 @@ Step 2 below is therefore split. Everything else is shared.
 | SDK root | `$HOME/android-tools-omega/` | `$HOME/android-tools/` |
 | library schema | `MyVideos131` / `MyMusic83` | `MyVideos148` / `MyMusic84` |
 
+## 0. Build host
+
+> [!IMPORTANT]
+> The `omega` target needs a build host of roughly 2024 vintage. **Ubuntu
+> 24.04 works with no workarounds.** Ubuntu 25.10 does not build it at all.
+
+Newer is actively worse here, and the reason is structural rather than
+incidental. `tools/depends/native/` compiles 2023-vintage sources with the
+**host** compiler, so the host's age is a compatibility constraint, not a
+detail:
+
+- GCC 15 defaults to C23, where `bool` is a keyword. That breaks m4's bundled
+  gnulib and pkg-config's bundled glib.
+- CMake 3.26.4 (what 21.3 pins) does not build against a 2025 libcurl
+  (`CURL_NETRC_OPTION` became a long) or OpenSSL 3.5 (`SSL_get_peer_certificate`
+  and `EVP_PKEY_id` are gone).
+
+None of that is worth patching around; each workaround only moves the failure
+to the next package. `tools/depends/target/` is unaffected either way, since
+it builds against the pinned NDK r21e rather than anything the distro ships.
+
+The `master` target tracks a newer Kodi whose native pins are current, so it
+does not have this constraint.
+
 ## 1. System packages
 
 ```sh

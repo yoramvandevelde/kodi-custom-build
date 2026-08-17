@@ -15,11 +15,20 @@
 #   SDK      platform 37            platform 34 (hardcoded TARGET_SDK)
 #   tools    build-tools 37.0.0     build-tools 33.0.1
 #
-# UNVALIDATED end-to-end as of writing. The patch series is confirmed to
-# APPLY to 21.3-Omega (one conflict, resolved: upstream renamed the Shairplay
-# CMake target from Shairplay::Shairplay to ${APP_NAME_LC}::Shairplay after
-# 21.3), but this exact toolchain combination has not been built yet. Expect
-# to fix a few things on the first real run.
+# VALIDATED end-to-end: built, packaged, installed on the device and confirmed
+# talking to the shared MySQL library (schema MyVideos131).
+#
+# Build host matters here, and not in the way "newer is better" suggests. This
+# was first attempted on Ubuntu 25.10 and got stuck in tools/depends/native,
+# which compiles 2023-vintage sources with the HOST compiler: GCC 15 defaults
+# to C23, where `bool` is a keyword, breaking m4's gnulib and pkg-config's
+# bundled glib, and CMake 3.26.4 will not build against a 2025 libcurl or
+# OpenSSL 3.5. None of that is patchable in any way worth carrying.
+#
+# Ubuntu 24.04 (GCC 13, still gnu17 by default) builds it with no workarounds
+# at all. Use that, or anything of a similar vintage. Only native/ is exposed
+# to the host toolchain; target/ sits behind the pinned NDK r21e and does not
+# care what the distro ships.
 set -euo pipefail
 
 # --- Target architecture ----------------------------------------------------
@@ -191,12 +200,20 @@ CMAKE_BIN="$DEPENDS_PREFIX/x86_64-linux-gnu-native/bin/cmake"
 # Carried over verbatim from master/build-kodi.sh, since the device and its
 # purpose are identical. See that script for the per-option reasoning.
 #
-# CAVEAT worth checking on the first configure of this target: CMake silently
-# ignores -D flags it doesn't recognise, so an option upstream renamed between
-# 21.3 and master would look like it applied while changing nothing. Kodi
-# prints an enabled/disabled dependency summary at the end of the configure
-# step (step 6) -- eyeball it once against this list and fix any that didn't
-# take, rather than assuming.
+# ENABLE_OPTICAL is ON here where master's build has it OFF, and that is
+# deliberate. 21.3's android depends builds libcdio by default (its
+# EXCLUDED_DEPENDS is just "libusb gtest"), so upstream expects optical to be
+# available on this platform. Switching it off means backporting master's
+# entire optical-optional refactor, because 21.3 guards the *use* of cdio but
+# not the *includes*: FileFactory.cpp, MusicDatabase.cpp (two method bodies as
+# well as the include) and music/tags/CMakeLists.txt all break. Not worth it
+# to drop a few hundred kB of dead code on a device with no disc drive.
+#
+# CAVEAT: CMake silently ignores -D flags it doesn't recognise, so an option
+# upstream renamed between 21.3 and master would look like it applied while
+# changing nothing. Kodi prints an enabled/disabled dependency summary at the
+# end of the configure step (step 6) -- eyeball it against this list rather
+# than assuming.
 CMAKE_EXTRA_ARGUMENTS="\
   -DAPP_PACKAGE=org.xbmc.kodi.dev \
   -DENABLE_AIRTUNES=OFF \
@@ -210,7 +227,7 @@ CMAKE_EXTRA_ARGUMENTS="\
   -DENABLE_MARIADBCLIENT=ON \
   -DENABLE_MICROHTTPD=OFF \
   -DENABLE_NFS=ON \
-  -DENABLE_OPTICAL=OFF \
+  -DENABLE_OPTICAL=ON \
   -DENABLE_PLIST=OFF \
   -DENABLE_SMBCLIENT=OFF \
   -DENABLE_SNDIO=OFF \
@@ -287,12 +304,17 @@ make -C native -j"$JOBS"
 # EXCLUDED_DEPENDS drops samba/samba-gplv3 (matches ENABLE_SMBCLIENT=OFF) and
 # libplist/libshairplay (matches ENABLE_AIRTUNES=OFF, ENABLE_PLIST=OFF). Plain
 # `=` assignment in target/Makefile, so a command-line override wins without
-# patching the tracked Makefile. Keeps the android-default exclusions
-# (libusb/libcdio/libcdio-gplv3) too, since an override replaces the whole
-# value rather than appending.
+# patching the tracked Makefile.
+#
+# An override replaces the whole value rather than appending, so this must
+# also repeat the platform's own defaults. For android on 21.3 those are
+# exactly "libusb gtest" -- NOT master's set. Copying master's list here was a
+# real bug: it dropped libcdio, which 21.3 does build for android and whose
+# absence fails the Kodi configure step outright, while silently un-excluding
+# gtest and building it for nothing.
 echo "==> Building target depends"
 make -C target -j"$JOBS" \
-  EXCLUDED_DEPENDS="libusb libcdio libcdio-gplv3 samba samba-gplv3 libplist libshairplay"
+  EXCLUDED_DEPENDS="libusb gtest samba samba-gplv3 libplist libshairplay"
 
 # --- 5. Binary addons -------------------------------------------------------
 # DISABLED, same as the master target and for the same unresolved reason:
