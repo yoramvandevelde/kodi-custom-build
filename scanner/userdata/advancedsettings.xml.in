@@ -19,9 +19,19 @@
     <pass>@KODI_DB_PASS@</pass>
   </musicdatabase>
 
-  <!-- Debug logging, on purpose and permanently. This box has no screen and
-       no watchdog: when a scan hangs, kodi.log is the only thing that says
-       which path it stopped on. The extra disk churn is irrelevant on a
-       container that lives for the length of one scan. -->
+  <videolibrary>
+    <!-- Remove entries for files that have disappeared, as part of the same
+         pass. Kodi runs this inside the scan, just before it logs "Finished
+         scan", so scan-wrapper.sh's single wait covers both. -->
+    <cleanonupdate>true</cleanonupdate>
+  </videolibrary>
+
+  <!-- Debug logging, on purpose and permanently. This box has no screen and no
+       watchdog, so when a scan hangs kodi.log is the only thing that says which
+       path it stopped on.
+
+       It is affordable because ~/.kodi/temp is redirected to disk while the
+       rest of the profile sits in RAM (see scan-wrapper.sh). A few hundred MB
+       per full scan would not fit in the tmpfs; on disk it is unremarkable. -->
   <loglevel>1</loglevel>
 </advancedsettings>

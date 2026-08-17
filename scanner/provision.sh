@@ -3,8 +3,8 @@
 #
 # Run this INSIDE the container, once, after creating it (see README.md for the
 # pct create side). It installs Kodi, renders the userdata templates from the
-# same env vars the APK builds use, drops the service addon in place, and wires
-# scan-wrapper.sh into boot.
+# same env vars the APK builds use, gives ALSA a null device so Kodi will start
+# at all, and wires scan-wrapper.sh into boot.
 #
 # Re-running is safe: everything here overwrites rather than appends.
 set -eu
@@ -13,7 +13,6 @@ SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
 CONFIG_DIR="/etc/kodi-scanner"
 KODI_USER="kodi"
 KODI_HOME="/home/$KODI_USER"
-ADDON_ID="service.kodi.scanner"
 
 # --- Config values ----------------------------------------------------------
 # Same variables, same values, same meaning as the APK builds: this scanner and
@@ -93,16 +92,34 @@ render() {
 render "$SELF_DIR/userdata/advancedsettings.xml.in" "$CONFIG_DIR/advancedsettings.xml"
 render "$SELF_DIR/userdata/sources.xml.in"          "$CONFIG_DIR/sources.xml"
 
+# No placeholders in this one, but it is staged alongside the others because the
+# profile it belongs to is a tmpfs rebuilt on every boot.
+cp "$SELF_DIR/userdata/guisettings.xml" "$CONFIG_DIR/guisettings.xml"
+
 # Contains the database password and the webdav URL with its credentials.
 chmod 600 "$CONFIG_DIR/advancedsettings.xml" "$CONFIG_DIR/sources.xml"
 
-# --- Addon ------------------------------------------------------------------
-# Staged here rather than installed into ~/.kodi directly: that profile is a
-# tmpfs created fresh on every boot, so the wrapper copies this in each time.
-echo "==> Staging $ADDON_ID"
+# Left over from the service-addon approach that this replaced. Remove it so a
+# re-provisioned container does not keep staging an addon nothing copies.
 rm -rf "$CONFIG_DIR/addon"
-mkdir -p "$CONFIG_DIR/addon"
-cp -r "$SELF_DIR/addon/$ADDON_ID" "$CONFIG_DIR/addon/"
+
+# --- Silence the audio engine -----------------------------------------------
+# There is no sound device in a container, and Kodi does not shrug that off: its
+# audio engine retries opening a sink every 500ms, forever, and never finishes
+# starting up. Nothing else runs, including the library scan. It presents as a
+# log full of:
+#
+#   CActiveAESink::OpenSink - no sink was returned
+#
+# Giving ALSA a null device makes the open succeed, so Kodi carries on. Nothing
+# here plays audio, so a sink that discards everything is exactly right.
+echo "==> Installing null ALSA device"
+cat > /etc/asound.conf <<'EOF'
+# Kodi will not start without an audio sink. This container has no sound
+# hardware and plays nothing, so hand it one that discards everything.
+pcm.!default { type null }
+ctl.!default { type null }
+EOF
 
 # --- Boot hook --------------------------------------------------------------
 echo "==> Installing boot hook"

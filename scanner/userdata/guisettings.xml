@@ -1,0 +1,30 @@
+<settings version="2">
+    <!-- Kodi's own "update library on startup". This is what makes the scanner
+         a scanner, and it replaced a custom service addon that did the same
+         thing via UpdateLibrary(video).
+
+         The addon route looked cleaner because it needed no pre-baked
+         guisettings.xml, but it never ran: Kodi discovered and registered it,
+         yet CServiceAddonManager never started it, with no error logged. This
+         setting is built in, does the same job, and does not depend on how
+         Kodi treats an addon dropped into a fresh profile. -->
+    <setting id="videolibrary.updateonstartup">true</setting>
+
+    <!-- Do not extract thumbnails from the video files themselves.
+
+         Default is on, and on a WebDAV source it is brutal: Kodi seeks to the
+         middle of each film (gigabytes into the file), pulls enough data to
+         decode a frame, and does that per title. Measured at 1-4 seconds each
+         plus the transfer, against a library of thousands.
+
+         All of that would be wasted here regardless of cost, because the
+         resulting thumbnail is written to the local per-instance texture cache
+         and never to the shared library. This container throws that cache away
+         every run.
+
+         Note this is NOT the same lever as <videolibrary><artworkLevel>, which
+         governs what gets written to the shared library and would starve the
+         streamer of artwork. This one only stops the scanner opening video
+         files to make its own thumbnails. -->
+    <setting id="myvideos.extractthumb">false</setting>
+</settings>

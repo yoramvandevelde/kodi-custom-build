@@ -17,41 +17,53 @@ set -eu
 KODI_USER="kodi"
 KODI_HOME="/home/$KODI_USER"
 CONFIG_DIR="/etc/kodi-scanner"
-ADDON_ID="service.kodi.scanner"
 DISPLAY_NUM=":99"
-LOG_KEEP_DIR="/var/log/kodi-scanner"
+LOG_DIR="/var/log/kodi-scanner"
 
 # --- Fresh tmpfs profile on every boot -------------------------------------
-# Nothing inside ~/.kodi needs to survive: the library lives in the shared
+# Nothing the profile holds needs to survive: the library lives in the shared
 # MySQL database, and the artwork cache (Textures13.db + Thumbnails/) is
 # per-instance and never reused, since this container is discarded after each
-# run. Keeping the profile in RAM avoids writing it only to bin it, and means
-# each run starts from a known-clean state.
+# run. Keeping it in RAM avoids writing it only to bin it, and guarantees each
+# run starts from a known-clean state.
 #
-# Filled mainly by the debug log, secondarily by cached artwork: Kodi caches
-# images for whatever the GUI shows, and the home screen widgets start pulling
-# them as soon as the skin loads, with nobody navigating anywhere.
+# The artwork is what makes that worth doing. Kodi caches images for whatever
+# the GUI shows, and the home screen widgets start pulling them as soon as the
+# skin loads, with nobody navigating anywhere. Worth knowing: that is NOT
+# something to fix with <videolibrary><artworkLevel>, which controls what gets
+# written to the library. The library is shared, so turning it down here would
+# starve the streamer of artwork too.
 #
-# Worth knowing: the artwork side is NOT something to fix with
-# <videolibrary><artworkLevel>. That controls which artwork URLs get written to
-# the library, and the library is shared, so turning it down here would starve
-# the streamer of artwork too.
+# The log does not live here; see the symlink below. Without it, what remains is
+# small (userdata and tens of MB of cached images), hence 256M in a container
+# with a gigabyte to its name.
 #
-# size= is a limit, not a reservation. If it fills, writes fail with ENOSPC and
-# stop there; it cannot grow into the container's memory. The scan is unaffected
-# either way, since that writes to MySQL over the network, so a full tmpfs costs
-# log fidelity rather than data.
+# size= is a limit, not a reservation, so it costs nothing until written to. If
+# it does fill, writes fail with ENOSPC and stop there rather than growing into
+# the container's memory, and the scan is unaffected regardless since that
+# writes to MySQL over the network.
 echo "==> Mounting tmpfs profile at $KODI_HOME/.kodi"
 mkdir -p "$KODI_HOME/.kodi"
-mountpoint -q "$KODI_HOME/.kodi" || mount -t tmpfs -o size=2G tmpfs "$KODI_HOME/.kodi"
+mountpoint -q "$KODI_HOME/.kodi" || mount -t tmpfs -o size=256M tmpfs "$KODI_HOME/.kodi"
 
-mkdir -p "$KODI_HOME/.kodi/userdata" \
-         "$KODI_HOME/.kodi/addons/$ADDON_ID" \
-         "$KODI_HOME/.kodi/temp"
+mkdir -p "$KODI_HOME/.kodi/userdata"
+
+# Log to disk, everything else to RAM. The two things filling this profile want
+# opposite treatment: cached artwork is worth throwing away every run, while the
+# debug log is the only diagnostic this box has and is worth keeping. The log is
+# also by far the larger of the two -- hundreds of MB for a full scan -- so
+# leaving it in the tmpfs would mean sizing that tmpfs around the thing we
+# actually want to persist, in a container with a gigabyte to its name.
+#
+# A symlink rather than a bind mount: one less mount to depend on working
+# inside an unprivileged container, and Kodi does not care.
+mkdir -p "$LOG_DIR/temp"
+chown -R "$KODI_USER:$KODI_USER" "$LOG_DIR"
+ln -sfn "$LOG_DIR/temp" "$KODI_HOME/.kodi/temp"
 
 cp "$CONFIG_DIR/advancedsettings.xml" "$KODI_HOME/.kodi/userdata/"
 cp "$CONFIG_DIR/sources.xml"          "$KODI_HOME/.kodi/userdata/"
-cp -r "$CONFIG_DIR/addon/$ADDON_ID/." "$KODI_HOME/.kodi/addons/$ADDON_ID/"
+cp "$CONFIG_DIR/guisettings.xml"      "$KODI_HOME/.kodi/userdata/"
 
 chown -R "$KODI_USER:$KODI_USER" "$KODI_HOME/.kodi"
 
@@ -75,24 +87,59 @@ until DISPLAY="$DISPLAY_NUM" xdpyinfo >/dev/null 2>&1; do
 done
 
 # --- The actual run ---------------------------------------------------------
-# Blocks until service.py has finished scanning and cleaning and called Quit.
+# guisettings.xml has videolibrary.updateonstartup, so Kodi begins scanning by
+# itself; nothing needs to tell it to start. What is left is noticing when it
+# has finished, and Kodi says so on one line:
+#
+#   VideoInfoScanner: Finished scan. Scanning for video info took N ms
+#
+# That is LOGINFO, so it appears even at loglevel 0, and it is logged *after*
+# the cleanup pass that <cleanonupdate> adds (see VideoInfoScanner::Process,
+# where CleanDatabase runs before this line). One signal covers both.
 echo "==> Starting kodi"
-su -s /bin/sh "$KODI_USER" -c "DISPLAY=$DISPLAY_NUM HOME=$KODI_HOME kodi --standalone" || \
-  echo "kodi exited non-zero ($?)" >&2
+su -s /bin/sh "$KODI_USER" -c "DISPLAY=$DISPLAY_NUM HOME=$KODI_HOME kodi --standalone" &
+KODI_JOB=$!
+
+# Poll the file rather than following it with tail: a tail started here could
+# miss the line if the scan somehow finished first, and re-reading the log every
+# half minute is cheap next to the scan itself.
+echo "==> Waiting for the scan to finish"
+while :; do
+  if grep -q "VideoInfoScanner: Finished scan" "$LOG_DIR/temp/kodi.log" 2>/dev/null; then
+    echo "==> Scan finished"
+    break
+  fi
+  # If Kodi is gone without ever logging that line, stop waiting: it crashed,
+  # or failed to start. Powering off with a preserved log beats hanging here.
+  if ! pgrep -u "$KODI_USER" >/dev/null 2>&1; then
+    echo "kodi exited before finishing a scan" >&2
+    break
+  fi
+  sleep 30
+done
+
+# SIGTERM rather than SIGKILL: Kodi closes its databases and flushes the log on
+# a clean shutdown, and by this point the library work is already committed.
+# /usr/bin/kodi is a shell wrapper around kodi-x11, so signal the user's whole
+# process group instead of the pid of that wrapper.
+echo "==> Stopping kodi"
+pkill -TERM -u "$KODI_USER" 2>/dev/null || true
+# Wait on the kodi job specifically, not a bare `wait`: Xvfb is also a
+# background job of this shell and is still running, so waiting on everything
+# would block here until it exits.
+wait "$KODI_JOB" 2>/dev/null || true
 
 kill "$XVFB_PID" 2>/dev/null || true
 
 # --- Keep the log ------------------------------------------------------------
-# The profile is tmpfs, so the log dies with the poweroff below. Copy it out
-# first: a crash still reaches this line, and a crashed run is exactly when the
-# log is worth having. One sequential write, rather than the constant dribble
-# of writing the log to disk as it is produced.
-if [ -f "$KODI_HOME/.kodi/temp/kodi.log" ]; then
-  mkdir -p "$LOG_KEEP_DIR"
-  cp "$KODI_HOME/.kodi/temp/kodi.log" "$LOG_KEEP_DIR/kodi-$(date +%Y%m%d-%H%M%S).log"
-  # Keep a fortnight; these are debug-level logs of a full library scan and
-  # they are not small.
-  find "$LOG_KEEP_DIR" -name 'kodi-*.log' -mtime +14 -delete 2>/dev/null || true
+# Already on disk, so nothing to rescue before poweroff -- a crash keeps its log
+# for free. Just move it aside under a timestamp, because Kodi only keeps one
+# previous run (kodi.log plus kodi.old.log) and would otherwise overwrite it
+# tomorrow night. A rename, so it costs nothing.
+if [ -f "$LOG_DIR/temp/kodi.log" ]; then
+  mv "$LOG_DIR/temp/kodi.log" "$LOG_DIR/kodi-$(date +%Y%m%d-%H%M%S).log"
+  # Keep a fortnight; debug logs of a full library scan are not small.
+  find "$LOG_DIR" -maxdepth 1 -name 'kodi-*.log' -mtime +14 -delete 2>/dev/null || true
 fi
 
 echo "==> Powering off"
