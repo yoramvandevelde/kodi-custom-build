@@ -89,10 +89,16 @@ $EDITOR scripts/kodi-env.sh        # same values as the APK builds
 ./scanner/provision.sh
 ```
 
-`provision.sh` installs Kodi and Xvfb, renders the userdata templates, stages
-the service addon, and hooks `scan-wrapper.sh` into boot via OpenRC's
+`provision.sh` installs Kodi and Xvfb, renders the userdata templates, gives
+ALSA a null device, and hooks `scan-wrapper.sh` into boot via OpenRC's
 `local.d`. It writes the rendered config to `/etc/kodi-scanner/` with mode 600,
 since it contains the database password and the WebDAV credentials.
+
+The null ALSA device is not optional. A container has no sound hardware, and
+Kodi does not shrug that off: its audio engine retries opening a sink every
+500ms forever and never finishes starting, so the scan never begins. It shows
+up as a log full of `CActiveAESink::OpenSink - no sink was returned` and
+nothing else happening.
 
 The checkout is only needed for provisioning. Nothing reads from it at runtime.
 
@@ -104,50 +110,79 @@ On the Proxmox host, one line:
 0 4 * * *  /usr/sbin/pct start 900
 ```
 
-That is the entire external interface. Everything else (scan, clean, shut
-down) happens inside.
+That is the entire external interface. Everything else (scan, shut down)
+happens inside.
 
 ## What happens on boot
 
 ```
 pct start 900
   └─ OpenRC local.d → scan-wrapper.sh
-       ├─ mount tmpfs at ~/.kodi, copy config + addon in
+       ├─ mount tmpfs at ~/.kodi, copy config in, symlink temp/ to disk
        ├─ start Xvfb, wait for it to accept connections
        ├─ start kodi --standalone
-       │    └─ service.kodi.scanner:
-       │         UpdateLibrary(video) → wait onScanFinished
-       │         CleanLibrary(video)  → wait onCleanFinished
-       │         Quit
-       ├─ copy kodi.log to /var/log/kodi-scanner/
+       │    └─ videolibrary.updateonstartup scans by itself
+       ├─ wait for "VideoInfoScanner: Finished scan" in the log
+       ├─ SIGTERM kodi
+       ├─ move kodi.log aside under a timestamp
        └─ poweroff
 ```
 
-### Why a service addon instead of JSON-RPC
+### How the scan is triggered and noticed
 
-The obvious approach is to enable Kodi's webserver, POST `VideoLibrary.Scan`,
-and poll `Library.IsScanningVideo` until it goes false. That needs the
-webserver turned on, which is a Kodi *setting* rather than something
-`advancedsettings.xml` can do, so it means pre-baking `guisettings.xml`. It
-also has a race: the first poll can read "not scanning" before the scan has
-begun.
+One setting does the work, and nothing needs to reach into Kodi from outside:
+`videolibrary.updateonstartup` in guisettings.xml makes Kodi scan on its own as
+soon as it starts. When it is done it logs
 
-A service addon has neither problem. It starts automatically, needs no open
-port, and registers its Monitor before triggering the scan, so the finished
-notification cannot be missed however fast the scan runs.
+```
+VideoInfoScanner: Finished scan. Scanning for video info took N ms
+```
+
+so the wrapper waits for that single line and then stops Kodi. That is
+`LOGINFO`, so it shows up even at `loglevel 0`.
+
+This replaced a custom service addon that called `UpdateLibrary(video)` and
+waited on `onScanFinished`. The addon was the tidier design on paper, because
+it needed no pre-baked `guisettings.xml`, but it never ran: Kodi discovered it,
+registered it, logged `service.kodi.scanner v1.0.0 installed`, and then
+`CServiceAddonManager` simply never started it, with no error either way, while
+`service.xbmc.versioncheck` started fine from the same profile. Two settings of
+XML beat an addon that will not start.
+
+The JSON-RPC route (POST `VideoLibrary.Scan`, poll `Library.IsScanningVideo`)
+was never used: it needs the webserver enabled, which is also a guisettings
+change, and polling races the start of the scan.
+
+### It scans, it does not clean
+
+`<videolibrary><cleanonupdate>` was in here and has been taken out, because on
+a network source it is dangerous.
+
+The clean decides what to delete by checking whether each path still exists. A
+WebDAV source that stalls does not answer, unreachable reads as gone, and Kodi
+deletes it. That is not hypothetical: a run whose connection died mid-clean
+removed roughly 700 perfectly good titles, and since the tables it walks log
+under a component that is off by default, it did so in complete silence. The
+first visible sign was the movie count dropping by several hundred.
+
+It repairs itself, because the NFOs sit beside the files and the next scan
+reads them back. But the restored rows are new `idFile` entries, so watched
+state and resume points for those titles are gone.
+
+Delete entries for removed files by hand instead, at a moment when the source
+is known healthy.
 
 ### RAM for the throwaway parts, disk for the log
 
 The profile is split, because the two things filling it want opposite
 treatment.
 
-**In RAM** (`~/.kodi` on a 256M tmpfs): userdata, the addon, and the artwork
-cache. None of it needs to survive. The library lives in MySQL, and
-`Textures13.db` + `Thumbnails/` are per-instance and never shared, so a
-container discarded after each run would be writing them only to throw them
-away. Kodi caches images for whatever the GUI shows, and Estuary's home screen
-widgets start pulling them as soon as the skin loads, with nobody navigating
-anywhere.
+**In RAM** (`~/.kodi` on a 256M tmpfs): userdata and the artwork cache. None of
+it needs to survive. The library lives in MySQL, and `Textures13.db` +
+`Thumbnails/` are per-instance and never shared, so a container discarded after
+each run would be writing them only to throw them away. Kodi caches images for
+whatever the GUI shows, and Estuary's home screen widgets start pulling them as
+soon as the skin loads, with nobody navigating anywhere.
 
 That artwork caching is **not** something to fix with
 `<videolibrary><artworkLevel>`: that controls which artwork URLs are written to
@@ -169,17 +204,17 @@ for free, since it was never in RAM to begin with.
 ### Sizing
 
 `size=256M` is a limit, not a reservation, so it costs nothing until written
-to. With the log elsewhere, what remains is userdata, the addon and tens of
-megabytes of cached images.
+to. With the log elsewhere, what remains is userdata and tens of megabytes of
+cached images.
 
 If it fills anyway, writes fail with `ENOSPC` and stop there. It cannot grow
 into the container's memory, which is what the explicit `size=` is for; a tmpfs
 mounted without one defaults to half of RAM and that warning would be real. The
 scan is unaffected regardless, since that writes to MySQL over the network.
 
-Kodi itself is the real memory consumer, somewhere in the hundreds of MB during
-a scan of a library this size. That is an estimate, not a measurement, and it is
-the number to check first if a 1G container turns out to be tight:
+Kodi itself is the real memory consumer. Measured at roughly **440 MB** during
+a full scan of this library (~7600 movies plus TV shows), so 1G leaves real
+headroom. To check on a future run:
 
 ```sh
 free -m
@@ -198,7 +233,16 @@ To look at a running or hung scan:
 
 ```sh
 pct enter 900
-tail -f /home/kodi/.kodi/temp/kodi.log
+tail -f /var/log/kodi-scanner/temp/kodi.log
+```
+
+At `loglevel 1` the scraper floods the log with `enable_tag_whitelist ... was
+not found` warnings, two lines per item, which drown out the progress. That is
+harmless noise: Kodi updates the TMDB scraper from the repo on startup, and the
+newer version asks for settings the saved ones do not have. Filter it out:
+
+```sh
+tail -f /var/log/kodi-scanner/temp/kodi.log | grep -E "Scanning dir|Rescanning dir|Finished scan"
 ```
 
 ## Keeping the config in step
@@ -220,9 +264,44 @@ compares them and fails on any difference in `sources.xml.in`, or in the
 database blocks of `advancedsettings.xml.in`. Run it after touching either
 side.
 
+## Only one machine should scan
+
+Not a preference, an architecture constraint. Kodi decides whether a directory
+changed by comparing an MD5 stored in the shared `path.strHash`, and
+`CVideoInfoScanner::GetPathHash` builds it from raw memory:
+
+```cpp
+digest.Update(pItem->GetPath());
+digest.Update(&pItem->m_dwSize, sizeof(pItem->m_dwSize));
+time_t tt{};
+pItem->m_dateTime.GetAsTime(tt);
+digest.Update(&tt, sizeof(tt));
+```
+
+Note `sizeof(tt)`. `time_t` is 4 bytes on 32-bit Android and 8 on x86_64 Linux,
+so the streamer (armv7a) and this scanner (x86_64) feed a different number of
+bytes into the digest and produce **different hashes for identical
+directories**. Kodi has already papered over neighbouring versions of this
+problem, with comments about forcing sort order and dropping milliseconds "to
+avoid hash mismatch between platforms", but not this one.
+
+The consequence: if both machines scan, each run invalidates every hash for the
+other, and both do a full walk every time, forever. With only the scanner
+scanning, its hashes are self-consistent and subsequent runs skip everything
+unchanged.
+
+So leave `videolibrary.updateonstartup` off on the streamer and any other
+client. It defaults to off, so this is a thing to verify rather than configure.
+Nothing breaks if a client does scan once: it costs the next scanner run a full
+walk, no more than that.
+
 ## Status
 
-Written but **not yet run end-to-end.** No container has been provisioned with
-it. Expect to fix things on the first real run, particularly around whether
-Kodi auto-enables a service addon dropped into a fresh profile, which is the
-step most likely to need a nudge.
+Runs end-to-end. Provisioned on an Alpine 3.24 container, connects to
+`MyVideos131` without creating a second database, and works through the source
+tree at roughly five directories per second once a listing is in.
+
+The first run walks everything, because the scanner starts with no path hashes
+of its own. Expect the WebDAV directory listings to dominate: measured between
+16 seconds and 3.5 minutes per folder depending on size, against ~200ms per
+title once a listing arrives.

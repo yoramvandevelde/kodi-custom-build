@@ -19,12 +19,16 @@
     <pass>@KODI_DB_PASS@</pass>
   </musicdatabase>
 
-  <videolibrary>
-    <!-- Remove entries for files that have disappeared, as part of the same
-         pass. Kodi runs this inside the scan, just before it logs "Finished
-         scan", so scan-wrapper.sh's single wait covers both. -->
-    <cleanonupdate>true</cleanonupdate>
-  </videolibrary>
+  <!-- No <videolibrary><cleanonupdate>, deliberately.
+       The clean decides what to delete by checking whether each path still
+       exists, and this source is WebDAV over the network. When that stalls,
+       unreachable reads as gone: a run whose connection died mid-clean removed
+       roughly 700 titles that were perfectly fine, and the tables it walks do
+       not log, so it happened silently.
+       They came back on the next scan (the NFOs sit beside the files), but the
+       re-added rows are new idFile entries, so watched state and resume points
+       for those titles are lost. Not worth it for the convenience of automatic
+       tidying. Clean by hand, on a moment when the source is known healthy. -->
 
   <!-- Debug logging, on purpose and permanently. This box has no screen and no
        watchdog, so when a scan hangs kodi.log is the only thing that says which

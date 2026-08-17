@@ -93,9 +93,12 @@ done
 #
 #   VideoInfoScanner: Finished scan. Scanning for video info took N ms
 #
-# That is LOGINFO, so it appears even at loglevel 0, and it is logged *after*
-# the cleanup pass that <cleanonupdate> adds (see VideoInfoScanner::Process,
-# where CleanDatabase runs before this line). One signal covers both.
+# That is LOGINFO, so it appears even at loglevel 0.
+#
+# Nothing cleans here. <cleanonupdate> used to be set and was removed: the clean
+# deletes any path it cannot reach, and against WebDAV "cannot reach" includes
+# "the connection stalled", which cost ~700 titles in one run, silently. See
+# userdata/advancedsettings.xml.in.
 echo "==> Starting kodi"
 su -s /bin/sh "$KODI_USER" -c "DISPLAY=$DISPLAY_NUM HOME=$KODI_HOME kodi --standalone" &
 KODI_JOB=$!
