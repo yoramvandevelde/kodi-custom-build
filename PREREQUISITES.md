@@ -20,7 +20,7 @@ Step 2 below is therefore split. Everything else is shared.
 
 ```sh
 sudo apt update
-sudo apt install autoconf bison build-essential ccache curl default-jdk \
+sudo apt install autoconf bison build-essential ccache curl openjdk-17-jdk \
   flex gawk git gperf lib32stdc++6 lib32z1 lib32z1-dev libcurl4-openssl-dev \
   unzip zip zlib1g-dev rsync
 ```
@@ -37,11 +37,22 @@ tmpfs cache -- skip it only if you don't want that.
 > [!NOTE]
 > On a 32-bit host, drop `lib32stdc++6 lib32z1 lib32z1-dev`.
 
-Check Java is 17+ (Gradle 8+ requires it):
+`openjdk-17-jdk` is named explicitly rather than `default-jdk` because "the
+default" is a per-release moving target, and newer is not better here: the
+`omega` target ships the Gradle 8.3 wrapper, which supports up to Java 20
+(Java 21 needs Gradle 8.5+). A JDK that's too new fails at the very last
+step, APK packaging, after the whole build has already run.
+
 ```sh
-java --version
+java --version     # expect 17
 ```
-If it's older, install a newer JDK and point `JAVA_HOME` at it.
+
+If a newer JDK is already the system default, either switch it or point
+`JAVA_HOME` at the 17 install:
+
+```sh
+sudo update-alternatives --config java
+```
 
 ## 2. Android SDK + NDK
 
