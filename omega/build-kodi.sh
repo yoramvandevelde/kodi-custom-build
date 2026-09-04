@@ -192,7 +192,12 @@ if [ ! -d "$SOURCE_REPO/.git" ]; then
   echo "yourself (or override with SOURCE_REPO=/path ./build-kodi.sh)." >&2
   exit 1
 fi
-JOBS=$(( $(nproc) - 1 ))                       # leave one core free for the rest of the system
+# One core left for the rest of the system, but overridable, because nproc is
+# the wrong number in a container: it reads the affinity mask, not the CFS
+# quota, so it reports the whole node however small the pod's cpu limit is.
+# JOBS is also the only real brake on peak memory here, since each parallel
+# compile can reach a gigabyte on the heaviest translation units.
+JOBS="${JOBS:-$(( $(nproc) - 1 ))}"
 
 CMAKE_BIN="$DEPENDS_PREFIX/x86_64-linux-gnu-native/bin/cmake"
 
