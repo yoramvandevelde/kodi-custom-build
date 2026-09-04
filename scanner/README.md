@@ -1,307 +1,238 @@
 # Scanner
 
-A disposable Alpine container that boots once a night, updates the shared
-video library, and powers itself off.
+A disposable container that runs once, updates the shared video library, and
+exits. The streamer is a client and can't be relied on to scan a large
+WebDAV source in the background, so scanning moves here instead: a container
+that exists only for the length of one library pass. It builds nothing, it's
+the stock Alpine `kodi` package, because the whole point of the streamer
+running 21.3 is that a released Kodi can share its library.
 
-## Why this exists
+This directory produces the **image** and the pipeline that builds it. The
+Kubernetes manifests that run it live elsewhere, in the GitOps repo; the
+[runtime contract](#runtime-contract) below is the interface between the two.
 
-The Google TV streamer is a client. It is started when someone wants to watch
-something, and it cannot be relied on to scan a large WebDAV source in the
-background with the screen off. So the scanning moves somewhere that has no
-opinion about screens: a container that exists only for the length of one
-library pass.
+## Version constraint
 
-Nothing here builds Kodi. Unlike the `master` and `omega` targets, this uses
-the stock Alpine package, because the whole point of putting the streamer on
-21.3 was that a released Kodi can share its library.
-
-## The version constraint
-
-Kodi compiles its library schema version into the binary and names the database
-after it. The 21.x line is `MyVideos131`, which is what the streamer and the
-existing library use.
-
-That makes the Kodi version here a hard requirement, not a preference:
+Kodi compiles its library schema into the binary and names the database
+after it. Mismatches don't error, Kodi just copies the nearest older
+database into a new one and migrates the copy, silently forking the library.
 
 | version | database | effect |
 |---|---|---|
-| 20.x | `MyVideos121` | builds a second, separate library |
-| **21.x** | **`MyVideos131`** | **correct** |
-| 22.x | `MyVideos148` | copies 131 into 148 and migrates it, stranding the streamer |
+| 20.x | `MyVideos121` | separate library |
+| **21.x** | **`MyVideos131`** | **correct** (matches streamer) |
+| 22.x | `MyVideos148` | migrates 131, stranding the streamer |
 
-None of the wrong outcomes report an error. Kodi looks for a database at its
-own schema version and, not finding one, copies the nearest older one and
-migrates the copy. The libraries simply stop being the same library.
+The base image tag is the pin. `alpine:3.24` carries kodi 21.3, the same
+release the streamer's APK is built from:
 
-`provision.sh` refuses to continue if the installed package is not 21.x, and
-**you must pin `/etc/apk/repositories` to an Alpine release carrying 21.x.**
-At time of writing every branch does:
-
-| Alpine | Kodi |
+| Alpine | kodi |
 |---|---|
-| v3.22 | 21.2 |
-| v3.23 | 21.3 |
-| v3.24 | 21.3 |
-| edge | 21.3 |
+| v3.22 | 21.2-r6 |
+| v3.23 | 21.3-r1 |
+| **v3.24** | **21.3-r4** |
+| edge | 21.3-r6 |
 
-When Kodi 22 lands in Alpine, upgrading is a decision to make deliberately and
-in step with rebuilding the streamer APK, not something to let `apk upgrade`
-do on its own.
+The Dockerfile reads the installed version back out of apk's database and
+**refuses to build** anything but 21.x, so a careless bump of `FROM` fails
+in CI instead of quietly forking the library at four in the morning. When
+Kodi 22 lands in Alpine, move this deliberately and in step with rebuilding
+the streamer APK.
 
-## Creating the container
-
-On the Proxmox host. Adjust storage, bridge and IDs to taste; `onboot=0` is
-the load-bearing part, since this container is meant to be started by cron and
-to stop itself.
+## Building
 
 ```sh
-pveam update
-pveam download local alpine-3.24-default_20260101_amd64.tar.xz   # adjust to what's listed
-
-pct create 900 local:vztmpl/alpine-3.24-default_20260101_amd64.tar.xz \
-  --hostname kodi-scanner \
-  --cores 4 --memory 1024 --swap 0 \
-  --rootfs local-lvm:8 \
-  --net0 name=eth0,bridge=vmbr0,ip=dhcp \
-  --onboot 0 \
-  --unprivileged 1
+docker build -t kodi-scanner scanner/
 ```
 
-1G is what this host had spare, and it is the number the rest of the design is
-built around: 256M of it goes to the tmpfs profile, the log is kept out of RAM
-entirely, and Kodi gets the remainder. Whether that remainder is comfortable
-for a scan of this size is the first thing to measure on a real run (see
-Sizing, below). Give it more if you have it.
+CI does the same on every push touching `scanner/`, and pushes to
+`ghcr.io/<owner>/kodi-scanner` as `latest` plus the commit sha
+(`.github/workflows/scanner-image.yml`). That workflow runs
+`check-templates.sh` first, so template drift stops the build.
 
-## Provisioning
+The published image is `linux/amd64`. A local build on an Apple Silicon
+machine produces an arm64 image and works fine for testing, because Alpine
+carries kodi 21.3 for aarch64 too.
 
-Inside the container, once:
+## Runtime contract
+
+What the thing running this image has to provide.
+
+| | |
+|---|---|
+| **env** | `KODI_DB_HOST`, `KODI_DB_PORT`, `KODI_DB_USER`, `KODI_DB_PASS`, `KODI_WEBDAV_SOURCE_URL`. Same values as the APK builds. Any one missing and it exits 1 before starting Kodi, rather than building its own separate library. |
+| **user** | uid/gid 1000, non-root (Kodi refuses to run as root). No capabilities, no privileged mode. |
+| **`/home/kodi/.kodi`** | Mount RAM here, 256M (`emptyDir` with `medium: Memory`). Throwaway profile. Note a memory-backed volume counts against the container's memory limit. |
+| **`/var/log/kodi-scanner`** | Mount persistent storage here for the log. Without it the log dies with the container. Needs to be writable by gid 1000 (`fsGroup: 1000`). |
+| **memory** | ~440MB measured for a full scan, plus whatever the RAM profile holds. |
+| **exit** | 0 once a scan finished, 1 if Kodi went away without finishing. Never a timeout of its own, see [No watchdog](#no-watchdog-deliberately). |
+| **concurrency** | One at a time, and only ever this one scanner, see [Only one machine should scan](#only-one-machine-should-scan). |
+| **stdout** | The scan-relevant lines only. The full log goes to the log volume. |
+
+Nothing needs `advancedsettings.xml` or `sources.xml` handed to it: those
+are rendered at start from the env vars above, so no credentials sit in an
+image layer.
+
+## Running it by hand
 
 ```sh
-apk add --no-cache git
-git clone https://github.com/yoramvandevelde/kodi-custom-build.git
-cd kodi-custom-build
-
-cp scripts/kodi-env.sh.example scripts/kodi-env.sh
-$EDITOR scripts/kodi-env.sh        # same values as the APK builds
-. scripts/kodi-env.sh
-
-./scanner/provision.sh
+docker run --rm \
+  --tmpfs /home/kodi/.kodi:size=256M,uid=1000,gid=1000 \
+  -v kodi-scanner-logs:/var/log/kodi-scanner \
+  -e KODI_DB_HOST=... -e KODI_DB_PORT=... \
+  -e KODI_DB_USER=... -e KODI_DB_PASS=... \
+  -e KODI_WEBDAV_SOURCE_URL=... \
+  kodi-scanner
 ```
 
-`provision.sh` installs Kodi and Xvfb, renders the userdata templates, gives
-ALSA a null device, and hooks `scan-wrapper.sh` into boot via OpenRC's
-`local.d`. It writes the rendered config to `/etc/kodi-scanner/` with mode 600,
-since it contains the database password and the WebDAV credentials.
+The `uid=1000,gid=1000` on the tmpfs is load-bearing: a bare `--tmpfs` mounts
+root-owned and Kodi runs as 1000. A named volume for the log inherits its
+ownership from the image; a bind-mounted host directory has to be made
+writable by uid 1000 yourself.
 
-The null ALSA device is not optional. A container has no sound hardware, and
-Kodi does not shrug that off: its audio engine retries opening a sink every
-500ms forever and never finishes starting, so the scan never begins. It shows
-up as a log full of `CActiveAESink::OpenSink - no sink was returned` and
-nothing else happening.
-
-The checkout is only needed for provisioning. Nothing reads from it at runtime.
-
-## Scheduling
-
-On the Proxmox host, one line:
-
-```cron
-0 4 * * *  /usr/sbin/pct start 900
-```
-
-That is the entire external interface. Everything else (scan, shut down)
-happens inside.
-
-## What happens on boot
+## What happens on start
 
 ```
-pct start 900
-  └─ OpenRC local.d → scan-wrapper.sh
-       ├─ mount tmpfs at ~/.kodi, copy config in, symlink temp/ to disk
+run the image
+  └─ entrypoint.sh
+       ├─ render userdata from env into ~/.kodi, symlink temp/ to the log volume
+       ├─ start the log filter that puts scan progress on stdout
        ├─ start Xvfb, wait for it to accept connections
-       ├─ start kodi --standalone
+       ├─ start kodi --standalone (under setsid, in its own process group)
        │    └─ videolibrary.updateonstartup scans by itself
        ├─ wait for "VideoInfoScanner: Finished scan" in the log
-       ├─ SIGTERM kodi
+       ├─ SIGTERM kodi's process group
        ├─ move kodi.log aside under a timestamp
-       └─ poweroff
+       └─ exit 0
 ```
 
-### How the scan is triggered and noticed
+`videolibrary.updateonstartup` in guisettings.xml makes Kodi scan on its own
+at start, no need to reach into it from outside. It logs
+`VideoInfoScanner: Finished scan. Scanning for video info took N ms` at
+`LOGINFO` when done, so the entrypoint waits for that line and stops Kodi.
 
-One setting does the work, and nothing needs to reach into Kodi from outside:
-`videolibrary.updateonstartup` in guisettings.xml makes Kodi scan on its own as
-soon as it starts. When it is done it logs
+This replaced a custom service addon (`UpdateLibrary(video)` +
+`onScanFinished`): Kodi registered it but `CServiceAddonManager` never
+started it, no error either way. The JSON-RPC route
+(`VideoLibrary.Scan` / poll `Library.IsScanningVideo`) was also skipped,
+it needs the webserver enabled and polling races the scan start. Two
+settings of XML beat both.
 
-```
-VideoInfoScanner: Finished scan. Scanning for video info took N ms
-```
+`setsid` matters because `/usr/bin/kodi` is a shell wrapper that does not
+exec `kodi-x11`: signalling the wrapper's pid alone would leave Kodi
+running. The old Proxmox container signalled every process owned by the
+`kodi` user instead, which is no longer an option now that the entrypoint
+itself runs as that user and would kill itself.
 
-so the wrapper waits for that single line and then stops Kodi. That is
-`LOGINFO`, so it shows up even at `loglevel 0`.
+There is no sound hardware, and Kodi does not shrug that off: its audio
+engine retries opening a sink every 500ms, forever, and never finishes
+starting (`CActiveAESink::OpenSink - no sink was returned` in the log). The
+image ships a null ALSA device so the open succeeds.
 
-This replaced a custom service addon that called `UpdateLibrary(video)` and
-waited on `onScanFinished`. The addon was the tidier design on paper, because
-it needed no pre-baked `guisettings.xml`, but it never ran: Kodi discovered it,
-registered it, logged `service.kodi.scanner v1.0.0 installed`, and then
-`CServiceAddonManager` simply never started it, with no error either way, while
-`service.xbmc.versioncheck` started fine from the same profile. Two settings of
-XML beat an addon that will not start.
+## It scans, it does not clean
 
-The JSON-RPC route (POST `VideoLibrary.Scan`, poll `Library.IsScanningVideo`)
-was never used: it needs the webserver enabled, which is also a guisettings
-change, and polling races the start of the scan.
+`<videolibrary><cleanonupdate>` was removed: it's dangerous on a network
+source. Clean decides what to delete by checking whether each path still
+exists, and an unreachable WebDAV read looks the same as "gone". A run whose
+connection died mid-clean silently removed ~700 good titles (the cleanup
+tables log under a component that's off by default). NFOs let a rescan
+restore the rows, but they come back as new `idFile` entries, watched state
+and resume points for those titles are gone for good.
 
-### It scans, it does not clean
+Delete entries for removed files by hand instead, when the source is known
+healthy.
 
-`<videolibrary><cleanonupdate>` was in here and has been taken out, because on
-a network source it is dangerous.
+## Profile layout: RAM for throwaway, disk for the log
 
-The clean decides what to delete by checking whether each path still exists. A
-WebDAV source that stalls does not answer, unreachable reads as gone, and Kodi
-deletes it. That is not hypothetical: a run whose connection died mid-clean
-removed roughly 700 perfectly good titles, and since the tables it walks log
-under a component that is off by default, it did so in complete silence. The
-first visible sign was the movie count dropping by several hundred.
+**RAM** (`~/.kodi`): userdata and artwork cache. Nothing here needs to
+survive, the library lives in MySQL, and `Textures13.db` / `Thumbnails/` are
+per-instance. Estuary's home screen starts pulling artwork into the cache as
+soon as it loads, with nobody navigating anywhere, so it'd otherwise be
+written just to be thrown away. (Don't fix this via
+`<videolibrary><artworkLevel>`, that controls what's written to the shared
+library and would starve the streamer's artwork too.)
 
-It repairs itself, because the NFOs sit beside the files and the next scan
-reads them back. But the restored rows are new `idFile` entries, so watched
-state and resume points for those titles are gone.
+**Disk** (`~/.kodi/temp` symlinked to `/var/log/kodi-scanner/temp`): the
+log. At `loglevel 1` a full scan runs to hundreds of MB, and it's the only
+diagnostic this container has. Each run is renamed to `kodi-<timestamp>.log`
+afterwards (Kodi only keeps one), fortnight retention. A crash keeps its log
+for free since it was never in RAM.
 
-Delete entries for removed files by hand instead, at a moment when the source
-is known healthy.
-
-### RAM for the throwaway parts, disk for the log
-
-The profile is split, because the two things filling it want opposite
-treatment.
-
-**In RAM** (`~/.kodi` on a 256M tmpfs): userdata and the artwork cache. None of
-it needs to survive. The library lives in MySQL, and `Textures13.db` +
-`Thumbnails/` are per-instance and never shared, so a container discarded after
-each run would be writing them only to throw them away. Kodi caches images for
-whatever the GUI shows, and Estuary's home screen widgets start pulling them as
-soon as the skin loads, with nobody navigating anywhere.
-
-That artwork caching is **not** something to fix with
-`<videolibrary><artworkLevel>`: that controls which artwork URLs are written to
-the library, and the library is shared, so turning it down here would starve
-the streamer of artwork too. Keeping the cache in RAM sidesteps it without
-touching what gets stored.
-
-**On disk** (`~/.kodi/temp` symlinked to `/var/log/kodi-scanner/temp`): the
-log. At `loglevel 1` a full scan logs every directory listing, scraper call and
-query, running to hundreds of MB. It is also the only diagnostic this box has,
-so it is the one thing worth keeping. Sizing the tmpfs around a file we
-explicitly want to persist would be backwards, and on disk a few hundred MB is
-unremarkable.
-
-Each run's log is renamed to `kodi-<timestamp>.log` afterwards, since Kodi
-itself only keeps one previous run. Fortnight retention. A crash keeps its log
-for free, since it was never in RAM to begin with.
+The entrypoint mounts nothing itself: `mount -t tmpfs` needs
+`CAP_SYS_ADMIN`, which this container has no business holding. Whether
+`~/.kodi` is RAM is the manifest's decision, and it runs either way.
 
 ### Sizing
 
-`size=256M` is a limit, not a reservation, so it costs nothing until written
-to. With the log elsewhere, what remains is userdata and tens of megabytes of
-cached images.
-
-If it fills anyway, writes fail with `ENOSPC` and stop there. It cannot grow
-into the container's memory, which is what the explicit `size=` is for; a tmpfs
-mounted without one defaults to half of RAM and that warning would be real. The
-scan is unaffected regardless, since that writes to MySQL over the network.
-
-Kodi itself is the real memory consumer. Measured at roughly **440 MB** during
-a full scan of this library (~7600 movies plus TV shows), so 1G leaves real
-headroom. To check on a future run:
-
-```sh
-free -m
-du -sh /home/kodi/.kodi/*
-ls -lh /var/log/kodi-scanner/
-```
+A 256M memory-backed volume is a limit, not a reservation, and costs nothing
+unless written to. If it fills, writes fail with `ENOSPC` and stop there.
+The scan itself is unaffected either way (it writes to MySQL over the
+network). Kodi itself is the real memory consumer, measured at roughly
+**440 MB** for a full scan (~7600 movies plus TV shows).
 
 ### No watchdog, deliberately
 
-There is no timeout anywhere. If a scan wedges, the container stays up with its
-log intact, which is the state worth inspecting, and a watchdog would destroy
-exactly that. A wedge is visible as "the library stopped updating", since the
-next `pct start` is a no-op against an already-running container.
+No timeout anywhere, and none should be added in the manifest either
+(`activeDeadlineSeconds` is the same mistake with a different name). If a
+scan wedges, the container stays up with its log intact instead of a
+watchdog destroying that evidence. A wedge shows as "the library stopped
+updating", because only one scanner may run at a time and the next one is
+therefore skipped.
 
-To look at a running or hung scan:
+The progress lines on stdout are the first place to look:
 
-```sh
-pct enter 900
-tail -f /var/log/kodi-scanner/temp/kodi.log
+```
+Scanning dir / Rescanning dir / Finished scan / ERROR
 ```
 
-At `loglevel 1` the scraper floods the log with `enable_tag_whitelist ... was
-not found` warnings, two lines per item, which drown out the progress. That is
-harmless noise: Kodi updates the TMDB scraper from the repo on startup, and the
-newer version asks for settings the saved ones do not have. Filter it out:
-
-```sh
-tail -f /var/log/kodi-scanner/temp/kodi.log | grep -E "Scanning dir|Rescanning dir|Finished scan"
-```
+The filter drops the harmless `enable_tag_whitelist ... was not found` noise
+from a TMDB scraper update. Everything else is in the timestamped log on the
+log volume.
 
 ## Keeping the config in step
 
-`sources.xml` must render **byte-identically** on the scanner and the streamer.
-Kodi stores the source path in the library's `path` table, so a URL differing
-by a trailing slash is a different source, and you get every title twice in one
-library.
-
-The streamer's templates live inside `omega/patches/0002-*.patch`; the
-scanner's are in `scanner/userdata/`. Two copies of something that must stay
-identical will drift, so:
+`sources.xml` must render **byte-identically** on the scanner and the
+streamer, Kodi stores the path in the library's `path` table, so a trailing
+slash makes it a different source and every title gets duplicated. The
+streamer's templates live in `omega/patches/0002-*.patch`, the scanner's in
+`scanner/userdata/`. Run after touching either side:
 
 ```sh
 ./scanner/check-templates.sh
 ```
 
-compares them and fails on any difference in `sources.xml.in`, or in the
-database blocks of `advancedsettings.xml.in`. Run it after touching either
-side.
+Fails on any difference in `sources.xml.in`, or in the database blocks of
+`advancedsettings.xml.in`. CI runs it before building the image.
 
 ## Only one machine should scan
 
-Not a preference, an architecture constraint. Kodi decides whether a directory
-changed by comparing an MD5 stored in the shared `path.strHash`, and
-`CVideoInfoScanner::GetPathHash` builds it from raw memory:
-
-```cpp
-digest.Update(pItem->GetPath());
-digest.Update(&pItem->m_dwSize, sizeof(pItem->m_dwSize));
-time_t tt{};
-pItem->m_dateTime.GetAsTime(tt);
-digest.Update(&tt, sizeof(tt));
-```
-
-Note `sizeof(tt)`. `time_t` is 4 bytes on 32-bit Android and 8 on x86_64 Linux,
-so the streamer (armv7a) and this scanner (x86_64) feed a different number of
-bytes into the digest and produce **different hashes for identical
-directories**. Kodi has already papered over neighbouring versions of this
-problem, with comments about forcing sort order and dropping milliseconds "to
-avoid hash mismatch between platforms", but not this one.
-
-The consequence: if both machines scan, each run invalidates every hash for the
-other, and both do a full walk every time, forever. With only the scanner
-scanning, its hashes are self-consistent and subsequent runs skip everything
+Architecture constraint, not a preference. Kodi hashes each directory
+(`CVideoInfoScanner::GetPathHash`) from path, size and an `m_dwSize`/`time_t`
+pair read straight out of memory, and `time_t` is 4 bytes on 32-bit Android
+vs 8 on x86_64 Linux. Streamer and scanner therefore produce **different
+hashes for identical directories**. If both scan, each run invalidates the
+other's hashes and both do a full walk forever; with only the scanner
+scanning, its hashes stay self-consistent and later runs skip what's
 unchanged.
 
 So leave `videolibrary.updateonstartup` off on the streamer and any other
-client. It defaults to off, so this is a thing to verify rather than configure.
-Nothing breaks if a client does scan once: it costs the next scanner run a full
-walk, no more than that.
+client (it defaults to off, verify rather than configure). A client
+scanning once isn't fatal, it just costs the next scanner run a full walk.
+
+Two scanner runs at once are worse than pointless for the same reason, on
+top of both writing to one library. Whatever schedules this has to refuse
+to start a second one.
 
 ## Status
 
-Runs end-to-end. Provisioned on an Alpine 3.24 container, connects to
-`MyVideos131` without creating a second database, and works through the source
-tree at roughly five directories per second once a listing is in.
+The image builds and runs end to end: config renders, the null ALSA device
+gets Kodi past audio init, Xvfb comes up, Kodi starts under its own process
+group, the finish line is detected, the log is archived and the container
+exits 0 (and 1 when Kodi dies first).
 
-The first run walks everything, because the scanner starts with no path hashes
-of its own. Expect the WebDAV directory listings to dominate: measured between
-16 seconds and 3.5 minutes per folder depending on size, against ~200ms per
-title once a listing arrives.
+Carried over from the Proxmox container this replaces, which ran the same
+Kodi and the same config: connects to `MyVideos131` without creating a
+second database, works through the source tree at roughly five directories
+per second once a listing is in. The first run walks everything (no path
+hashes yet); WebDAV directory listings dominate (16s-3.5min per folder
+depending on size, vs ~200ms per title once a listing arrives).

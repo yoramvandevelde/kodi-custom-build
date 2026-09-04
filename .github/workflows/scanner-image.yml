@@ -1,0 +1,62 @@
+name: scanner image
+
+# Builds the nightly library scanner and pushes it to GHCR.
+#
+# The template check runs first and is not a formality: it compares
+# scanner/userdata/ against the streamer's copies inside
+# omega/patches/0002-*.patch. If those two render different source URLs, Kodi
+# treats them as two sources in the one shared library and every title shows up
+# twice. That is the failure this pipeline exists to catch early, so drift fails
+# the build before an image can be published.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'scanner/**'
+      - 'omega/patches/0002-*.patch'
+      - '.github/workflows/scanner-image.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check userdata templates against the streamer's
+        run: ./scanner/check-templates.sh
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/kodi-scanner
+          tags: |
+            type=raw,value=latest
+            type=sha,format=long
+
+      # linux/amd64 only: that is what the cluster runs, and this image is not
+      # worth an emulated build for anything else. It still builds natively on
+      # arm64 (Alpine carries kodi 21.3 for aarch64 as well), which is what a
+      # local `docker build` on an Apple Silicon machine does.
+      - uses: docker/build-push-action@v6
+        with:
+          context: scanner
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
