@@ -26,6 +26,14 @@ RUN apt-get update \
 ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
 ENV PATH="$JAVA_HOME/bin:$PATH"
 
+# uid 1000 is already taken. Ubuntu ships a default "ubuntu" user at 1000 from
+# 24.04 onwards, where earlier releases left it free, so useradd collides
+# unless that one goes first. 1000 rather than any free uid because the
+# cluster's securityContext pins runAsUser to it.
+RUN userdel -r ubuntu \
+ && groupadd -g 1000 builder \
+ && useradd -u 1000 -g 1000 -m -d /home/builder -s /bin/bash builder
+
 # Its own SDK root, matching the layout PREREQUISITES.md insists on:
 # tools/depends/configure.ac picks build-tools with `sort -V | tail -n 1`, so a
 # root shared with the master target would silently hand this build the wrong
@@ -37,6 +45,11 @@ ENV NDK_PATH=/opt/android-sdk-omega/ndk/21.4.7075529
 # cmdline-tools;latest is not optional. configure.ac requires an sdkmanager
 # inside the SDK root it is given, and omega/build-kodi.sh checks for it up
 # front rather than failing halfway through ./configure.
+#
+# The chown belongs in this layer and not a later one. Changing ownership in a
+# separate RUN makes the layer a full copy of every file it touches, so a
+# standalone `chown -R` over the SDK put roughly four gigabytes into the image
+# twice, once owned by root and once by builder.
 RUN mkdir -p "$NDK_SDK" \
  && curl -fsSL -o /tmp/cmdline-tools.zip \
       https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip \
@@ -46,21 +59,14 @@ RUN mkdir -p "$NDK_SDK" \
  && "$NDK_SDK/cmdline-tools/bin/sdkmanager" --sdk_root="$NDK_SDK" \
       "cmdline-tools;latest" platform-tools \
       "platforms;android-34" "build-tools;33.0.1" "ndk;$NDK_VERSION" \
- && rm -rf /root/.android
+ && rm -rf /root/.android \
+ && chown -R 1000:1000 "$NDK_SDK"
 
 # build-kodi.sh signs every buildType with the Android debug keystore and reads
 # it from $HOME, with no way to point it elsewhere. Nothing creates that file
 # in a container, so make it here with the well-known values the script
 # expects. Self-signed, for sideloading; it is not a secret and its passwords
 # are published in Android's own documentation.
-# uid 1000 is already taken. Ubuntu ships a default "ubuntu" user at 1000 from
-# 24.04 onwards, where earlier releases left it free, so useradd collides
-# unless that one goes first. 1000 rather than any free uid because the
-# cluster's securityContext pins runAsUser to it.
-RUN userdel -r ubuntu \
- && groupadd -g 1000 builder \
- && useradd -u 1000 -g 1000 -m -d /home/builder -s /bin/bash builder
-
 ENV HOME=/home/builder
 RUN mkdir -p "$HOME/.android" \
  && keytool -genkeypair -v -keystore "$HOME/.android/debug.keystore" \
@@ -68,12 +74,6 @@ RUN mkdir -p "$HOME/.android" \
       -keyalg RSA -keysize 2048 -validity 10000 \
       -dname "CN=Android Debug,O=Android,C=US" >/dev/null \
  && chown -R 1000:1000 "$HOME"
-
-# The SDK is only read during a build, as far as anything here needs it. It is
-# handed over anyway: finding out that some part of configure or Gradle wanted
-# to write a lock or a temp file in there is a discovery worth making at image
-# build time rather than forty minutes into a compile.
-RUN chown -R 1000:1000 "$NDK_SDK"
 
 # Everything large and disposable goes here, on whatever volume the caller
 # mounts. Deliberately not under $HOME, which holds the baked keystore and
