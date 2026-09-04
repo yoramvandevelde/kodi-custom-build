@@ -1,0 +1,175 @@
+From 89241441020c669519efde352ddedad48c756403 Mon Sep 17 00:00:00 2001
+From: Yoram van de Velde <yoortje@gmail.com>
+Date: Fri, 4 Sep 2026 20:36:26 +0200
+Subject: [PATCH] android: force the GUI settings this build depends on
+
+guisettings.xml fits neither policy in the userdata seed patch. Overwriting it
+on every start would discard whatever was configured from the sofa; writing it
+only when missing would never reach a device that already runs. So this is done
+per key instead: parse whatever is on disk, force the handful this build needs,
+leave everything else alone.
+
+The two keys are what puts JSON-RPC on port 9090 within reach of anything off
+the device. ENABLE_MICROHTTPD=OFF removed the HTTP transport, but CTCPServer is
+core and still compiled in; it is simply gated on services.esenabled, and binds
+to localhost only unless services.esallinterfaces is set.
+
+Removing the default="true" attribute matters more than it looks. Kodi reads
+the element's value and then resets the setting when that attribute is present,
+so a value written beside it is discarded in the same pass.
+
+A parse failure logs and changes nothing: losing the enforced setting is
+recoverable, losing a profile is not.
+---
+ .../android/packaging/xbmc/src/Splash.java.in | 128 ++++++++++++++++++
+ 1 file changed, 128 insertions(+)
+
+diff --git a/tools/android/packaging/xbmc/src/Splash.java.in b/tools/android/packaging/xbmc/src/Splash.java.in
+index 62cf383..aa12052 100644
+--- a/tools/android/packaging/xbmc/src/Splash.java.in
++++ b/tools/android/packaging/xbmc/src/Splash.java.in
+@@ -41,6 +41,16 @@ import java.util.concurrent.ExecutorService;
+ import java.util.concurrent.Executors;
+ import java.util.zip.ZipEntry;
+ import java.util.zip.ZipFile;
++import javax.xml.parsers.DocumentBuilder;
++import javax.xml.parsers.DocumentBuilderFactory;
++import javax.xml.transform.OutputKeys;
++import javax.xml.transform.Transformer;
++import javax.xml.transform.TransformerFactory;
++import javax.xml.transform.dom.DOMSource;
++import javax.xml.transform.stream.StreamResult;
++import org.w3c.dom.Document;
++import org.w3c.dom.Element;
++import org.w3c.dom.NodeList;
+ 
+ public class Splash extends Activity
+ {
+@@ -658,6 +668,124 @@ public class Splash extends Activity
+     syncSeedUserdataFile("advancedsettings.xml", true);
+     syncSeedUserdataFile("mediasources.xml", false);
+     syncSeedUserdataFile("sources.xml", false);
++    enforceGuiSettings();
++  }
++
++  /**
++   * guisettings.xml is neither of the two policies above. Overwriting it
++   * wholesale would discard everything configured from the sofa; seeding it
++   * only when missing would never reach a device that already runs. So this
++   * one is per key: read whatever is there, force the handful we care about,
++   * leave the rest untouched.
++   *
++   * Enforced rather than seeded, deliberately. Turning the toggle off in the
++   * GUI works until the next start, which is the intended behaviour for
++   * settings this build depends on.
++   */
++  private static final String[][] ENFORCED_GUI_SETTINGS = {
++    // JSON-RPC over TCP (port 9090) is how anything off-device asks this Kodi
++    // to play something. Without esallinterfaces the server binds to localhost
++    // and a remote connection is refused; esenabled gates the server existing
++    // at all (NetworkServices.cpp, StartJSONRPCServer).
++    { "services.esenabled",       "true" },
++    { "services.esallinterfaces", "true" },
++  };
++
++  private void enforceGuiSettings()
++  {
++    File destDir = getUserdataDir();
++    destDir.mkdirs();
++    File dest = new File(destDir, "guisettings.xml");
++
++    try
++    {
++      DocumentBuilder builder = DocumentBuilderFactory.newInstance().newDocumentBuilder();
++      Document doc;
++      if (dest.exists())
++        doc = builder.parse(dest);
++      else
++      {
++        // A partial file is enough: Kodi falls back to the built-in default
++        // for every setting the profile does not mention.
++        doc = builder.newDocument();
++        Element created = doc.createElement("settings");
++        created.setAttribute("version", "2");
++        doc.appendChild(created);
++      }
++
++      Element root = doc.getDocumentElement();
++      if (root == null || !"settings".equals(root.getNodeName()))
++      {
++        Log.e(TAG, "guisettings.xml has no <settings> root, leaving it alone");
++        return;
++      }
++
++      boolean changed = false;
++      for (String[] pair : ENFORCED_GUI_SETTINGS)
++        changed |= forceGuiSetting(doc, root, pair[0], pair[1]);
++
++      if (!changed)
++        return;
++
++      File tmp = new File(destDir, "guisettings.xml.tmp");
++      Transformer transformer = TransformerFactory.newInstance().newTransformer();
++      transformer.setOutputProperty(OutputKeys.INDENT, "yes");
++      try (FileOutputStream out = new FileOutputStream(tmp))
++      {
++        transformer.transform(new DOMSource(doc), new StreamResult(out));
++        out.getFD().sync();
++      }
++
++      if (!tmp.renameTo(dest))
++      {
++        Log.e(TAG, "Failed to atomically install guisettings.xml");
++        tmp.delete();
++      }
++      else
++        Log.i(TAG, "Enforced GUI settings in " + dest);
++    }
++    catch (Exception e)
++    {
++      // A malformed or unreadable profile must not be destroyed by this.
++      // Losing the enforced setting is recoverable; losing guisettings is not.
++      Log.e(TAG, "Could not enforce GUI settings: " + e.getMessage());
++    }
++  }
++
++  /**
++   * Sets one setting to a value, adding the element if it is not there.
++   *
++   * Removing default="true" is load-bearing, not tidiness. CSettingsManager
++   * reads the value and then calls setting->Reset() when that attribute is
++   * present (SettingsManager.cpp, "the setting's value hasn't been updated and
++   * is the default value"), so a value written next to it is read and
++   * discarded in the same breath.
++   *
++   * @return true if the document was actually changed
++   */
++  private boolean forceGuiSetting(Document doc, Element root, String id, String value)
++  {
++    NodeList settings = root.getElementsByTagName("setting");
++    for (int i = 0; i < settings.getLength(); i++)
++    {
++      Element setting = (Element) settings.item(i);
++      if (!id.equals(setting.getAttribute("id")))
++        continue;
++
++      boolean wasDefault = setting.hasAttribute("default");
++      if (!wasDefault && value.equals(setting.getTextContent()))
++        return false;
++
++      setting.removeAttribute("default");
++      setting.setTextContent(value);
++      return true;
++    }
++
++    Element added = doc.createElement("setting");
++    added.setAttribute("id", id);
++    added.setTextContent(value);
++    root.appendChild(added);
++    return true;
+   }
+ 
+   /**
+-- 
+2.55.0
+
