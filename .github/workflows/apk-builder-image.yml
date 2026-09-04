@@ -1,0 +1,60 @@
+name: apk builder image
+
+# Builds the environment the omega APK is compiled in, and pushes it to GHCR.
+#
+# The image carries the toolchain and the entrypoint, nothing device-specific:
+# every KODI_* value arrives when a build runs, so this image is as public as
+# this repository. The APK it produces is another matter and never goes near a
+# registry.
+#
+# Rebuild it when the toolchain moves, not when a patch changes. The patch
+# series and the build scripts are cloned at run time precisely so that
+# altering one does not mean rebuilding several gigabytes of Android SDK.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'omega/builder/**'
+      - '.github/workflows/apk-builder-image.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/kodi-apk-builder
+          tags: |
+            type=raw,value=latest
+            type=sha,format=long
+
+      # linux/amd64 only, and here that is a hard requirement rather than a
+      # preference: NDK r21e predates Apple Silicon and ships no arm64 Linux
+      # host toolchain either, so the depends system has nothing to run on any
+      # other architecture.
+      - uses: docker/build-push-action@v6
+        with:
+          context: omega/builder
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
