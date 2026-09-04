@@ -53,12 +53,27 @@ RUN mkdir -p "$NDK_SDK" \
 # in a container, so make it here with the well-known values the script
 # expects. Self-signed, for sideloading; it is not a secret and its passwords
 # are published in Android's own documentation.
+# uid 1000 is already taken. Ubuntu ships a default "ubuntu" user at 1000 from
+# 24.04 onwards, where earlier releases left it free, so useradd collides
+# unless that one goes first. 1000 rather than any free uid because the
+# cluster's securityContext pins runAsUser to it.
+RUN userdel -r ubuntu \
+ && groupadd -g 1000 builder \
+ && useradd -u 1000 -g 1000 -m -d /home/builder -s /bin/bash builder
+
 ENV HOME=/home/builder
 RUN mkdir -p "$HOME/.android" \
  && keytool -genkeypair -v -keystore "$HOME/.android/debug.keystore" \
       -storepass android -keypass android -alias androiddebugkey \
       -keyalg RSA -keysize 2048 -validity 10000 \
-      -dname "CN=Android Debug,O=Android,C=US" >/dev/null
+      -dname "CN=Android Debug,O=Android,C=US" >/dev/null \
+ && chown -R 1000:1000 "$HOME"
+
+# The SDK is only read during a build, as far as anything here needs it. It is
+# handed over anyway: finding out that some part of configure or Gradle wanted
+# to write a lock or a temp file in there is a discovery worth making at image
+# build time rather than forty minutes into a compile.
+RUN chown -R 1000:1000 "$NDK_SDK"
 
 # Everything large and disposable goes here, on whatever volume the caller
 # mounts. Deliberately not under $HOME, which holds the baked keystore and
@@ -68,5 +83,11 @@ WORKDIR /mnt/buildram
 
 COPY build-apk.sh /usr/local/bin/build-apk
 RUN chmod 0755 /usr/local/bin/build-apk
+
+# Everything from here runs unprivileged. Nothing at run time needs root: the
+# packages were installed above, and a build is git, rsync, make, cmake and
+# gradle. The volume mounted at WORKDIR needs to be writable by this uid, which
+# is the caller's job (fsGroup: 1000).
+USER 1000:1000
 
 ENTRYPOINT ["/usr/local/bin/build-apk"]
