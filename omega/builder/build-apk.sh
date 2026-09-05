@@ -5,7 +5,13 @@
 #   KODI_DB_HOST KODI_DB_PORT KODI_DB_USER KODI_DB_PASS KODI_WEBDAV_SOURCE_URL
 #   ARCH      arm64 (default) or armv7a
 #   REPO_REF  branch or tag of kodi-custom-build to build (default main)
-#   OUT_DIR   where the finished APK is copied (default /out)
+#   OUT_DIR   where the finished APK is copied, if that directory exists
+#
+# And, to publish rather than leave it on a volume:
+#   FORGEJO_URL    base URL of the Forgejo instance
+#   FORGEJO_OWNER  the user or organisation the package belongs to
+#   FORGEJO_TOKEN  a token with write:package
+#   APK_PACKAGE    package name (default kodi-apk)
 #
 # The KODI_* values are baked into advancedsettings.xml and sources.xml, so
 # they decide which library the resulting APK talks to. Building the household
@@ -77,10 +83,47 @@ df -h "$WORK"
 du -sh "$WORK"/* 2>/dev/null | sort -h | tail -5
 
 echo "==> Collecting the APK"
-mkdir -p "$OUT_DIR"
 apk=$(find "$WORK" -name '*.apk' -type f -printf '%T@ %p\n' | sort -rn | head -1 | cut -d' ' -f2-)
 [ -n "$apk" ] || { echo "the build produced no apk" >&2; exit 1; }
 
-dest="$OUT_DIR/kodi-omega-$ARCH-$(date +%Y%m%d-%H%M%S).apk"
-cp -v "$apk" "$dest"
-sha256sum "$dest"
+version="$(date +%Y%m%d-%H%M%S)"
+name="kodi-omega-$ARCH-$version.apk"
+
+# The volume is optional now that the APK can be published. Keeping it while
+# both exist is deliberate: an upload that fails after an hour of building
+# should not be the only copy that ever existed.
+if [ -d "$OUT_DIR" ]; then
+  cp -v "$apk" "$OUT_DIR/$name"
+  sha256sum "$OUT_DIR/$name"
+fi
+
+if [ -n "${FORGEJO_TOKEN:-}" ]; then
+  : "${FORGEJO_URL:?FORGEJO_TOKEN is set but FORGEJO_URL is not}"
+  : "${FORGEJO_OWNER:?FORGEJO_TOKEN is set but FORGEJO_OWNER is not}"
+  package="${APK_PACKAGE:-kodi-apk}"
+  url="$FORGEJO_URL/api/packages/$FORGEJO_OWNER/generic/$package/$version/$name"
+
+  echo "==> Publishing to $url"
+  # --fail-with-body so a rejection shows what the server said rather than just
+  # a status code, and three tries because losing an hour of build to one
+  # dropped connection is not worth the simplicity.
+  for attempt in 1 2 3; do
+    if curl --fail-with-body -sS -X PUT \
+         -H "Authorization: token $FORGEJO_TOKEN" \
+         --upload-file "$apk" "$url"; then
+      echo "==> Published $package $version"
+      exit 0
+    fi
+    echo "   attempt $attempt failed" >&2
+    sleep 5
+  done
+
+  echo "Upload failed three times." >&2
+  [ -d "$OUT_DIR" ] && echo "The APK is still at $OUT_DIR/$name." >&2
+  exit 1
+fi
+
+if [ ! -d "$OUT_DIR" ]; then
+  echo "Nowhere to put the APK: no $OUT_DIR and no FORGEJO_TOKEN." >&2
+  exit 1
+fi
