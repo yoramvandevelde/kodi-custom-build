@@ -62,22 +62,23 @@ RUN mkdir -p "$NDK_SDK" \
  && rm -rf /root/.android \
  && chown -R 1000:1000 "$NDK_SDK"
 
-# build-kodi.sh signs every buildType with the Android debug keystore and reads
-# it from $HOME, with no way to point it elsewhere. Nothing creates that file
-# in a container, so make it here with the well-known values the script
-# expects. Self-signed, for sideloading; it is not a secret and its passwords
-# are published in Android's own documentation.
+# No keystore is baked in, deliberately.
+#
+# An earlier version generated one here with keytool. That gave every rebuild
+# of this image a different signing identity, so an APK it produced could not
+# update one from an older image: Android refuses with
+# INSTALL_FAILED_UPDATE_INCOMPATIBLE, and uninstalling first takes the device's
+# texture cache and a full artwork re-download with it.
+#
+# The key belongs to whoever owns the app, not to the build environment. It
+# arrives at run time through KODI_ANDROID_STORE_FILE, and build-kodi.sh now
+# refuses to start without it rather than quietly signing with something
+# disposable.
 ENV HOME=/home/builder
-RUN mkdir -p "$HOME/.android" \
- && keytool -genkeypair -v -keystore "$HOME/.android/debug.keystore" \
-      -storepass android -keypass android -alias androiddebugkey \
-      -keyalg RSA -keysize 2048 -validity 10000 \
-      -dname "CN=Android Debug,O=Android,C=US" >/dev/null \
- && chown -R 1000:1000 "$HOME"
+RUN mkdir -p "$HOME/.android" && chown -R 1000:1000 "$HOME"
 
 # Everything large and disposable goes here, on whatever volume the caller
-# mounts. Deliberately not under $HOME, which holds the baked keystore and
-# would be shadowed by a mount.
+# mounts. Deliberately not under $HOME, which a mount there would shadow.
 ENV TARBALLS=/mnt/buildram/tarballs
 WORKDIR /mnt/buildram
 

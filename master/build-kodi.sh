@@ -179,10 +179,16 @@ export PATH="$DEPENDS_PREFIX/x86_64-linux-gnu-native/bin:$PATH"
 # for every buildType (debug included), read from these four env vars. Reuse
 # the debug.keystore (self-signed, personal sideload use -- see 3.3 in
 # docs/README.Android.md for how it was generated).
-export KODI_ANDROID_KEY_ALIAS="androiddebugkey"
-export KODI_ANDROID_KEY_PASSWORD="android"
-export KODI_ANDROID_STORE_FILE="$HOME/.android/debug.keystore"
-export KODI_ANDROID_STORE_PASSWORD="android"
+export KODI_ANDROID_KEY_ALIAS="${KODI_ANDROID_KEY_ALIAS:-androiddebugkey}"
+export KODI_ANDROID_KEY_PASSWORD="${KODI_ANDROID_KEY_PASSWORD:-android}"
+export KODI_ANDROID_STORE_FILE="${KODI_ANDROID_STORE_FILE:-$HOME/.android/debug.keystore}"
+export KODI_ANDROID_STORE_PASSWORD="${KODI_ANDROID_STORE_PASSWORD:-android}"
+
+if [ ! -f "$KODI_ANDROID_STORE_FILE" ]; then
+  echo "Keystore not found: $KODI_ANDROID_STORE_FILE" >&2
+  echo "Set KODI_ANDROID_STORE_FILE, or create the Android debug keystore." >&2
+  exit 1
+fi
 
 mkdir -p "$RAMDIR" \
   "$DEPENDS_PREFIX/x86_64-linux-gnu-native" \
