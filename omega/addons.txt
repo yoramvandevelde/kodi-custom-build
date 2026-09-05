@@ -1,0 +1,47 @@
+# Addons bundled into the APK, on top of the 54 that Kodi ships itself.
+#
+# Why bundle rather than install on the device: an addon dropped into a
+# profile is registered but left disabled (enabled=0 in Addons33.db), and Kodi
+# does not resolve its dependencies for it either. Selecting the skin then
+# loads a broken interface. Addons that ship in the source tree's addons/
+# become system addons instead, which Kodi enables itself.
+#
+# Why the whole list rather than just the skin: skin.arctic.zephyr.mod requires
+# six addons directly, and plugin.video.themoviedb.helper drags in the whole
+# script.module.* row behind it. Kodi fetches none of them on its own.
+#
+# Versions are what the streamer ran on 2026-09-05, not "latest". A skin and
+# its dependencies that are known to work together are worth more than being
+# current, and this is rebuilt a few times a year at most.
+#
+# id                                    version
+skin.arctic.zephyr.mod                  3.0.3
+
+# Required by the skin.
+script.skinshortcuts                    2.0.3
+script.globalsearch                     9.0.7
+script.image.resource.select            3.0.2
+resource.images.weathericons.white      0.0.6
+script.embuary.info                     2.0.8
+script.embuary.helper                   2.0.8
+plugin.video.themoviedb.helper          5.4.16
+
+# Pulled in by the above, mostly by themoviedb.helper.
+script.module.addon.signals             0.0.6+matrix.1
+script.module.arrow                     1.2.3
+script.module.beautifulsoup4            4.12.2
+script.module.certifi                   2023.5.7
+script.module.chardet                   5.1.0
+script.module.dateutil                  2.8.2
+script.module.idna                      3.10.0
+script.module.infotagger                0.0.8
+script.module.jurialmunkey              0.2.28
+script.module.requests                  2.31.0
+script.module.routing                   0.2.3+matrix.1
+script.module.simplecache               2.0.2
+script.module.simpleeval                0.9.13
+script.module.six                       1.16.0+matrix.1
+script.module.soupsieve                 2.4.1
+script.module.typing_extensions         4.7.1
+script.module.unidecode                 1.3.6
+script.module.urllib3                   2.2.3
