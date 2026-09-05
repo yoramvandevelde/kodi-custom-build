@@ -68,6 +68,14 @@ umask 022
 echo "==> Clone, patch and build"
 ./install.sh omega "$WORK/xbmc-omega"
 
+# Reported rather than measured by hand, because by the time a Job is worth
+# looking at its pod is Succeeded and kubectl exec is refused, so the number
+# can only be caught while the build runs. It is also the first thing worth
+# knowing about a build that failed: whether it simply ran out of room.
+echo "==> Disk"
+df -h "$WORK"
+du -sh "$WORK"/* 2>/dev/null | sort -h | tail -5
+
 echo "==> Collecting the APK"
 mkdir -p "$OUT_DIR"
 apk=$(find "$WORK" -name '*.apk' -type f -printf '%T@ %p\n' | sort -rn | head -1 | cut -d' ' -f2-)
