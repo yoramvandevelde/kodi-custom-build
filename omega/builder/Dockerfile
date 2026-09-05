@@ -1,21 +1,14 @@
-# Build environment for the omega APK, so the build runs the same way in the
-# cluster as it did on a workstation.
+# Build environment for the omega APK. Toolchain and entrypoint only: the patch
+# series and build scripts are cloned at run time so changing one does not mean
+# rebuilding several gigabytes of Android SDK.
 #
-# Only the environment and the entrypoint live here. The patch series and the
-# build scripts are cloned at run time, because those are what actually change:
-# baking them would mean rebuilding several gigabytes of Android SDK to alter
-# one patch.
-#
-# Nothing device-specific is baked in. Every KODI_* value arrives as an
-# environment variable when the build runs, so this image stays as public as
-# the repository it is built from.
+# No KODI_* value is baked in; they all arrive as env vars at run time, so this
+# image is as public as the repository.
 FROM ubuntu:24.04
 
-# From PREREQUISITES.md. openjdk-17-jdk by name rather than default-jdk: the
-# omega target ships the Gradle 8.3 wrapper, which supports up to Java 20, and
-# a too-new JDK fails at APK packaging after the whole build has already run.
-# rsync is not upstream Kodi's requirement but this repo's: build-kodi.sh syncs
-# the source tree on every run.
+# openjdk-17-jdk by name, not default-jdk: omega ships the Gradle 8.3 wrapper,
+# which supports up to Java 20, and a newer JDK fails at APK packaging, after
+# the whole build. rsync is this repo's requirement, not Kodi's.
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       autoconf bison build-essential ca-certificates ccache curl flex gawk git \
@@ -26,30 +19,25 @@ RUN apt-get update \
 ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
 ENV PATH="$JAVA_HOME/bin:$PATH"
 
-# uid 1000 is already taken. Ubuntu ships a default "ubuntu" user at 1000 from
-# 24.04 onwards, where earlier releases left it free, so useradd collides
-# unless that one goes first. 1000 rather than any free uid because the
-# cluster's securityContext pins runAsUser to it.
+# Ubuntu 24.04 ships a user at uid 1000, so it has to go before useradd. 1000
+# specifically, not any free uid: the cluster pins runAsUser to it.
 RUN userdel -r ubuntu \
  && groupadd -g 1000 builder \
  && useradd -u 1000 -g 1000 -m -d /home/builder -s /bin/bash builder
 
-# Its own SDK root, matching the layout PREREQUISITES.md insists on:
-# tools/depends/configure.ac picks build-tools with `sort -V | tail -n 1`, so a
-# root shared with the master target would silently hand this build the wrong
-# ones. There is only one target in this image, but the paths stay explicit.
+# Own SDK root. tools/depends/configure.ac:589 picks build-tools with
+# `sort -V | tail -n 1`, so a root shared with the master target hands this
+# build the wrong ones with no way to ask for an older version.
 ENV NDK_SDK=/opt/android-sdk-omega
 ENV NDK_VERSION=21.4.7075529
 ENV NDK_PATH=/opt/android-sdk-omega/ndk/21.4.7075529
 
-# cmdline-tools;latest is not optional. configure.ac requires an sdkmanager
-# inside the SDK root it is given, and omega/build-kodi.sh checks for it up
-# front rather than failing halfway through ./configure.
+# cmdline-tools;latest is required: configure.ac wants an sdkmanager inside the
+# SDK root it is given.
 #
-# The chown belongs in this layer and not a later one. Changing ownership in a
-# separate RUN makes the layer a full copy of every file it touches, so a
-# standalone `chown -R` over the SDK put roughly four gigabytes into the image
-# twice, once owned by root and once by builder.
+# The chown has to be in this layer. In a separate RUN it makes the layer a full
+# copy of every file it touches, which put four gigabytes of SDK in the image
+# twice.
 RUN mkdir -p "$NDK_SDK" \
  && curl -fsSL -o /tmp/cmdline-tools.zip \
       https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip \
@@ -62,33 +50,23 @@ RUN mkdir -p "$NDK_SDK" \
  && rm -rf /root/.android \
  && chown -R 1000:1000 "$NDK_SDK"
 
-# No keystore is baked in, deliberately.
-#
-# An earlier version generated one here with keytool. That gave every rebuild
-# of this image a different signing identity, so an APK it produced could not
-# update one from an older image: Android refuses with
-# INSTALL_FAILED_UPDATE_INCOMPATIBLE, and uninstalling first takes the device's
-# texture cache and a full artwork re-download with it.
-#
-# The key belongs to whoever owns the app, not to the build environment. It
-# arrives at run time through KODI_ANDROID_STORE_FILE, and build-kodi.sh now
-# refuses to start without it rather than quietly signing with something
-# disposable.
+# No keystore in the image. A key generated per image build gives every image a
+# different signing identity, and Android then refuses the upgrade with
+# INSTALL_FAILED_UPDATE_INCOMPATIBLE; uninstalling first costs the device its
+# texture cache. The key arrives at run time via KODI_ANDROID_STORE_FILE.
 ENV HOME=/home/builder
 RUN mkdir -p "$HOME/.android" && chown -R 1000:1000 "$HOME"
 
-# Everything large and disposable goes here, on whatever volume the caller
-# mounts. Deliberately not under $HOME, which a mount there would shadow.
+# Large and disposable, on whatever volume the caller mounts. Not under $HOME,
+# which a mount there would shadow.
 ENV TARBALLS=/mnt/buildram/tarballs
 WORKDIR /mnt/buildram
 
 COPY build-apk.sh /usr/local/bin/build-apk
 RUN chmod 0755 /usr/local/bin/build-apk
 
-# Everything from here runs unprivileged. Nothing at run time needs root: the
-# packages were installed above, and a build is git, rsync, make, cmake and
-# gradle. The volume mounted at WORKDIR needs to be writable by this uid, which
-# is the caller's job (fsGroup: 1000).
+# Unprivileged from here; nothing at run time needs root. The volume at WORKDIR
+# must be writable by this uid, which is the caller's job (fsGroup: 1000).
 USER 1000:1000
 
 ENTRYPOINT ["/usr/local/bin/build-apk"]

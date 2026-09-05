@@ -1,13 +1,8 @@
 #!/usr/bin/env bash
-# Full "clean clone -> APK" build pipeline for Kodi 21.3-Omega on tmpfs.
+# Clean clone to APK for Kodi 21.3-Omega.
 #
-# Sibling of master/build-kodi.sh. Same shape, same tmpfs/ccache/rsync
-# approach, but pinned to the 21.3-Omega RELEASE instead of tracking
-# xbmc/xbmc master. See ../README.md for why both exist.
-#
-# The two targets are NOT interchangeable in their toolchain requirements --
-# that is the entire reason this is a separate script rather than a flag on
-# the other one:
+# A separate script from master/build-kodi.sh rather than a flag on it, because
+# the toolchains do not overlap:
 #
 #            master (untagged)      21.3-Omega (this script)
 #   NDK      r28c, auto-detected    r21e, --with-ndk-path REQUIRED
@@ -15,29 +10,17 @@
 #   SDK      platform 37            platform 34 (hardcoded TARGET_SDK)
 #   tools    build-tools 37.0.0     build-tools 33.0.1
 #
-# VALIDATED end-to-end: built, packaged, installed on the device and confirmed
-# talking to the shared MySQL library (schema MyVideos131).
-#
-# Build host matters here, and not in the way "newer is better" suggests. This
-# was first attempted on Ubuntu 25.10 and got stuck in tools/depends/native,
-# which compiles 2023-vintage sources with the HOST compiler: GCC 15 defaults
-# to C23, where `bool` is a keyword, breaking m4's gnulib and pkg-config's
-# bundled glib, and CMake 3.26.4 will not build against a 2025 libcurl or
-# OpenSSL 3.5. None of that is patchable in any way worth carrying.
-#
-# Ubuntu 24.04 (GCC 13, still gnu17 by default) builds it with no workarounds
-# at all. Use that, or anything of a similar vintage. Only native/ is exposed
-# to the host toolchain; target/ sits behind the pinned NDK r21e and does not
-# care what the distro ships.
+# Build host: Ubuntu 24.04 or similar vintage. tools/depends/native compiles
+# 2023-era sources with the HOST compiler, and GCC 15 (C23 by default) breaks
+# m4's gnulib and pkg-config's glib. Only native/ is exposed to the host;
+# target/ sits behind the pinned NDK.
 set -euo pipefail
 
 # --- Target architecture ----------------------------------------------------
-# Identical semantics to master/build-kodi.sh on purpose: scripts/kodi-env.sh
-# is shared between both targets, so ARCH has to mean the same thing here.
-# arm64  -> arm64-v8a (aarch64-linux-android)   -- 64-bit devices
-# armv7a -> armeabi-v7a (arm-linux-androideabi) -- 32-bit-only devices, e.g.
-#           anything whose `adb shell getprop ro.product.cpu.abilist` doesn't
-#           list arm64-v8a
+# Same meaning as in master/build-kodi.sh: scripts/kodi-env.sh is shared.
+# arm64  -> arm64-v8a (aarch64-linux-android)
+# armv7a -> armeabi-v7a (arm-linux-androideabi), for devices whose
+#           `adb shell getprop ro.product.cpu.abilist` lacks arm64-v8a
 ARCH="${ARCH:-arm64}"
 case "$ARCH" in
   arm64)  HOST="aarch64-linux-android" ;;
@@ -48,19 +31,15 @@ case "$ARCH" in
     ;;
 esac
 
-# 21.3-Omega's tools/depends/configure.ac defaults use_ndk_api to 21, where
-# master defaults to 24. Matching upstream's own default here rather than
-# carrying master's value over: 21 is what Kodi's CI actually built and
-# released 21.3 with, and TARGET_MINSDK in cmake/platform/android/android.cmake
-# is 21 to match. It also feeds the depends dir name below, so it must agree
-# with whatever ./configure ends up using or step 4 silently builds into the
-# wrong prefix.
+# Upstream's own default for this release: tools/depends/configure.ac:92 and
+# TARGET_MINSDK in cmake/platform/android/android.cmake:9. Also feeds
+# DEPENDS_DIR_NAME below, so it must match what ./configure uses or step 4
+# builds into the wrong prefix.
 NDK_API=21
 
 # --- MySQL library config (baked into advancedsettings.xml) ----------------
-# This build's only purpose is delivering this config, so an unset value is a
-# hard failure -- checked here too (not just by CMake later) so a missing var
-# doesn't burn ~35-40 min of depends build before finding out.
+# Checked here as well as by CMake, so a missing value costs a second instead of
+# 40 minutes of depends build.
 for var in KODI_DB_HOST KODI_DB_PORT KODI_DB_USER KODI_DB_PASS; do
   if [ -z "${!var:-}" ]; then
     echo "$var is not set. This build exists solely to bake in the MySQL" >&2
@@ -89,48 +68,29 @@ DEPENDS_DIR_NAME="$HOST-$NDK_API-release"   # matches configure.ac's
                                              # $use_host-$use_ndk_api-$build_type
 CCACHE_DIR="$RAMDIR/ccache"
 
-# NOTE ON RAMDISK SHARING: master/ and omega/ deliberately use the SAME
-# ramdisk paths. Only one target is ever resident at a time; switching is
-# `scripts/save-buildcache.sh <current>` then
-# `scripts/restore-buildcache.sh <other>`, which swaps the whole tree via a
-# per-target backup dir. Two complete depends+source+build trees do not
-# comfortably share a 35G tmpfs, and interleaving them under subdirs would
-# also mean two native-tools prefixes (each with their own cmake/ninja/python)
-# for no benefit, since you only ever build one at a time anyway.
-# The important consequence: NEVER run this straight after a master build
-# without restoring omega's cache first, or step 2 will reconfigure a tree
-# full of master's depends and rebuild far more than you expect.
+# master/ and omega/ share these paths, so only one target is resident at a
+# time. Switching is scripts/save-buildcache.sh then scripts/restore-buildcache.sh.
+# Running this straight after a master build without restoring first makes step 2
+# reconfigure a tree full of master's depends.
 
 # --- Android SDK/NDK: dedicated root, NOT shared with the master build -----
-# Own SDK root on purpose. 21.3 needs platform 34 + build-tools 33.0.1 + NDK
-# r21e, master needs platform 37 + build-tools 37.0.0 + NDK r28c, and
-# tools/depends/configure.ac picks build-tools by
-#   `ls $use_sdk_path/build-tools | sort -V | tail -n 1`
-# i.e. ALWAYS the newest one installed, with no way to ask for an older one.
-# Sharing one root would therefore silently hand this build master's
-# build-tools 37.0.0 no matter what's documented. Two roots removes the
-# ambiguity entirely instead of trying to work around that sort order.
+# tools/depends/configure.ac:589 picks build-tools with `sort -V | tail -n 1`,
+# always the newest installed, with no way to ask for an older one. One shared
+# root would hand this build master's build-tools 37.0.0.
 NDK_SDK="${NDK_SDK:-$HOME/android-tools-omega/android-sdk-linux}"
 
-# Unlike master, 21.3's configure has NO NDK auto-detection under the SDK
-# root: tools/depends/configure.ac hard-errors with "NDK path is required for
-# android" if --with-ndk-path is absent. So it's an explicit value here, and
-# checked below rather than discovered halfway through ./configure.
-NDK_VERSION="${NDK_VERSION:-21.4.7075529}"   # r21e, what Kodi's own
-                                              # docs/README.Android.md for this
-                                              # release recommends and what
-                                              # their CI built 21.3 with
+# No NDK auto-detection in this release: tools/depends/configure.ac:567 errors
+# with "NDK path is required for android" without --with-ndk-path.
+NDK_VERSION="${NDK_VERSION:-21.4.7075529}"   # r21e, per this release's
+                                              # docs/README.Android.md
 NDK_PATH="${NDK_PATH:-$NDK_SDK/ndk/$NDK_VERSION}"
 
-# Shared with the master target: this is purely a download cache of upstream
-# dependency tarballs, keyed by filename+version, so two Kodi versions asking
-# for different dep versions just means both sets live here. Nothing to
-# collide.
+# Shared with master: a download cache keyed by filename+version, so both
+# targets' dependency sets coexist here.
 TARBALLS="${TARBALLS:-$HOME/android-tools/xbmc-tarballs}"
 
-# Fail fast on toolchain layout, before anything expensive runs. Each of
-# these otherwise surfaces as a confusing error deep inside ./configure or,
-# worse, as a build that silently used the wrong component.
+# Fail fast on toolchain layout. Each of these otherwise surfaces deep inside
+# ./configure, or as a build that silently used the wrong component.
 if [ ! -d "$NDK_SDK" ]; then
   echo "NDK_SDK ($NDK_SDK) does not exist." >&2
   echo "21.3-Omega needs its OWN sdk root, separate from the master build's" >&2
@@ -146,11 +106,8 @@ if [ ! -f "$NDK_PATH/source.properties" ] && [ ! -f "$NDK_PATH/RELEASE.TXT" ]; t
   exit 1
 fi
 # configure.ac wants an sdkmanager inside the sdk root itself, at one of three
-# fixed paths. Easy to miss when populating a second root: installing packages
-# into it with ANOTHER root's sdkmanager (--sdk_root=...) works fine and gets
-# you the ndk/platforms/build-tools, but leaves no cmdline-tools behind here,
-# so ./configure fails later on a root that looks complete. Install
-# "cmdline-tools;latest" into this root too.
+# fixed paths. Populating a root with another root's sdkmanager gets you the
+# ndk/platforms/build-tools but leaves no cmdline-tools here.
 if [ ! -f "$NDK_SDK/tools/bin/sdkmanager" ] \
    && [ ! -f "$NDK_SDK/cmdline-tools/bin/sdkmanager" ] \
    && [ ! -f "$NDK_SDK/cmdline-tools/latest/bin/sdkmanager" ]; then
@@ -169,8 +126,8 @@ if [ ! -d "$NDK_SDK/platforms/android-34" ]; then
   echo "not substitute for it. Install 'platforms;android-34'." >&2
   exit 1
 fi
-# Not fatal, but worth shouting about: configure takes the highest-versioned
-# build-tools it finds, so an extra newer one here quietly wins over 33.0.1.
+# Not fatal: configure takes the highest-versioned build-tools it finds, so an
+# extra newer one wins over 33.0.1.
 if [ -d "$NDK_SDK/build-tools" ]; then
   bt_count=$(ls -1 "$NDK_SDK/build-tools" 2>/dev/null | wc -l)
   bt_used=$(ls -1 "$NDK_SDK/build-tools" 2>/dev/null | sort -V | tail -n 1)
@@ -193,33 +150,21 @@ if [ ! -d "$SOURCE_REPO/.git" ]; then
   echo "yourself (or override with SOURCE_REPO=/path ./build-kodi.sh)." >&2
   exit 1
 fi
-# One core left for the rest of the system, but overridable, because nproc is
-# the wrong number in a container: it reads the affinity mask, not the CFS
-# quota, so it reports the whole node however small the pod's cpu limit is.
-# JOBS is also the only real brake on peak memory here, since each parallel
-# compile can reach a gigabyte on the heaviest translation units.
-JOBS="${JOBS:-$(( $(nproc) - 1 ))}"
 
+JOBS="${JOBS:-$(( $(nproc) - 1 ))}"
 CMAKE_BIN="$DEPENDS_PREFIX/x86_64-linux-gnu-native/bin/cmake"
 
-# --- Own config: features stripped for a single-purpose Google TV Streamer box ---
-# Carried over verbatim from master/build-kodi.sh, since the device and its
-# purpose are identical. See that script for the per-option reasoning.
+# --- Features stripped for a single-purpose Google TV Streamer box ---------
+# Same list as master/build-kodi.sh; see that script for the per-option reasons.
 #
-# ENABLE_OPTICAL is ON here where master's build has it OFF, and that is
-# deliberate. 21.3's android depends builds libcdio by default (its
-# EXCLUDED_DEPENDS is just "libusb gtest"), so upstream expects optical to be
-# available on this platform. Switching it off means backporting master's
-# entire optical-optional refactor, because 21.3 guards the *use* of cdio but
-# not the *includes*: FileFactory.cpp, MusicDatabase.cpp (two method bodies as
-# well as the include) and music/tags/CMakeLists.txt all break. Not worth it
-# to drop a few hundred kB of dead code on a device with no disc drive.
+# ENABLE_OPTICAL is ON here and OFF in master. Turning it off in 21.3 means
+# backporting master's optical-optional refactor: this release guards the use of
+# cdio but not the includes, so FileFactory.cpp, MusicDatabase.cpp and
+# music/tags/CMakeLists.txt all break. Not worth a few hundred kB.
 #
-# CAVEAT: CMake silently ignores -D flags it doesn't recognise, so an option
-# upstream renamed between 21.3 and master would look like it applied while
-# changing nothing. Kodi prints an enabled/disabled dependency summary at the
-# end of the configure step (step 6) -- eyeball it against this list rather
-# than assuming.
+# CMake ignores -D flags it does not recognise, so an option renamed between
+# 21.3 and master looks applied while changing nothing. Check this list against
+# the dependency summary Kodi prints at the end of step 6.
 CMAKE_EXTRA_ARGUMENTS="\
   -DAPP_PACKAGE=org.xbmc.kodi.dev \
   -DENABLE_AIRTUNES=OFF \
@@ -243,23 +188,15 @@ CMAKE_EXTRA_ARGUMENTS="\
 
 export CCACHE_DIR
 
-# Put the native-built cmake/ninja on PATH -- see master/build-kodi.sh for the
-# full explanation (nested ExternalProject_Add reconfigures re-resolve ninja
-# via PATH and only inherit the generator NAME, so without this it bites
-# intermittently).
+# Native-built cmake/ninja on PATH: nested ExternalProject_Add reconfigures
+# re-resolve ninja via PATH and inherit only the generator name.
 export PATH="$DEPENDS_PREFIX/x86_64-linux-gnu-native/bin:$PATH"
 
-# Release APK signing: build.gradle.in's signingConfigs.release block is used
-# for every buildType (debug included), read from these four env vars.
-#
-# The defaults are the Android debug keystore, which is what a workstation
-# already has and is fine for personal sideloading. They are overridable
-# because the signing identity decides whether an APK can ever update an
-# installed one: a different key means Android refuses with
-# INSTALL_FAILED_UPDATE_INCOMPATIBLE and the only way forward is uninstalling,
-# which takes the device's texture cache and a full artwork re-download with
-# it. A build that runs somewhere without a stable $HOME therefore has to be
-# able to bring its own key.
+# build.gradle.in's signingConfigs.release block is used for every buildType,
+# read from these four env vars. Defaults to the workstation's Android debug
+# keystore. Overridable because the signing identity decides whether an APK can
+# update an installed one: a different key means INSTALL_FAILED_UPDATE_INCOMPATIBLE
+# and a reinstall, which costs the device its texture cache.
 export KODI_ANDROID_KEY_ALIAS="${KODI_ANDROID_KEY_ALIAS:-androiddebugkey}"
 export KODI_ANDROID_KEY_PASSWORD="${KODI_ANDROID_KEY_PASSWORD:-android}"
 export KODI_ANDROID_STORE_FILE="${KODI_ANDROID_STORE_FILE:-$HOME/.android/debug.keystore}"
@@ -277,34 +214,24 @@ mkdir -p "$RAMDIR" \
   "$BUILD_DIR" \
   "$CCACHE_DIR"
 
-# --- 1. Source: sync the working tree onto ramdisk, every run --------------
-# Deliberately rsync (via an explicit git-driven file list), not `git clone`:
-# picks up uncommitted edits, and doesn't stamp every file's mtime to "now"
-# the way a fresh clone would (which would make ninja rebuild the world).
-# File list from `git ls-files` rather than a directory mirror, and no
-# --delete, because tools/depends/target/* holds built dependency state that
-# isn't all gitignored -- see master/build-kodi.sh for the full reasoning.
+# --- 1. Source: sync the working tree into $SRC, every run -----------------
+# rsync from a git-driven file list, not `git clone`: keeps uncommitted edits
+# and does not stamp every mtime to now, which would make ninja rebuild
+# everything. No --delete: tools/depends/target/* holds built state that is not
+# all gitignored.
 echo "==> Syncing kodi source into $SRC"
 mkdir -p "$SRC"
 git -C "$SOURCE_REPO" ls-files -z --cached --others --exclude-standard \
   | rsync -a --files-from=- --from0 "$SOURCE_REPO/" "$SRC/"
 
-# --- 1b. Bundle the addons this build ships with ---------------------------
-# Everything under addons/ in the source tree ends up in the APK as a system
-# addon (54 of the 56 present do; only the two demo scrapers are left out), and
-# Kodi enables system addons itself. That is the whole reason for doing it here
-# rather than dropping the files into a profile: an addon placed in a profile
-# is registered with enabled=0 and stays invisible, and Kodi resolves no
-# dependencies for it either, so selecting the skin loads a broken interface.
-#
-# No filelist to edit. cmake/installdata/common/addons.txt does not mention
-# skin.estuary either, and that ships fine.
-#
-# Downloads are cached next to the build so a rerun does not refetch 60MB, and
-# an addon that is already unpacked is left alone.
+# --- 1b. Fetch the addons this build ships with ----------------------------
+# The skin and its dependencies, from addons.txt, into bundled-addons/ next to
+# the source tree. The patched cmake/scripts/android/Install.cmake picks them up
+# from there. Not into the source tree's own addons/: nothing globs that.
 ADDON_LIST="${ADDON_LIST:-$SELF_DIR/addons.txt}"
 ADDON_CACHE="${ADDON_CACHE:-$RAMDIR/addon-zips}"
 ADDON_MIRROR="${ADDON_MIRROR:-https://mirrors.kodi.tv/addons/omega}"
+ADDON_DIR="$SRC/bundled-addons"
 
 if [ -f "$ADDON_LIST" ]; then
   mkdir -p "$ADDON_CACHE"
@@ -313,7 +240,7 @@ if [ -f "$ADDON_LIST" ]; then
     case "$addon" in ''|\#*) continue ;; esac
     [ -n "$version" ] || { echo "No version for $addon in $ADDON_LIST" >&2; exit 1; }
 
-    if [ -d "$SRC/addons/$addon" ]; then
+    if [ -d "$ADDON_DIR/$addon" ]; then
       continue
     fi
 
@@ -328,26 +255,21 @@ if [ -f "$ADDON_LIST" ]; then
       mv "$zip.part" "$zip"
     fi
 
-    unzip -q -o "$zip" -d "$SRC/addons"
-    [ -d "$SRC/addons/$addon" ] \
-      || { echo "$zip did not unpack to addons/$addon" >&2; exit 1; }
+    unzip -q -o "$zip" -d "$ADDON_DIR"
+    [ -f "$ADDON_DIR/$addon/addon.xml" ] \
+      || { echo "$zip did not unpack to $addon/ with an addon.xml" >&2; exit 1; }
     n=$((n + 1))
   done < "$ADDON_LIST"
   echo "==> Bundled $n addon(s) from $ADDON_LIST"
 fi
 
 # --- 1c. Userdata that ships with the build --------------------------------
-# The skin's own settings and the skinshortcuts menu, which is where the twenty
-# minutes of clicking actually lives: guisettings.xml turned out to hold seven
-# non-default values, and everything else was in here.
-#
-# Copied into the source tree rather than carried in a patch, for the same
-# reason as the addons: this is data, and a patch adding fourteen XML files
-# would have to be regenerated every time one of them changes.
+# The skin's settings and the skinshortcuts menu. Copied into the source tree
+# rather than carried in a patch: it is data, and a patch would need
+# regenerating every time one of the files changes.
 #
 # Splash.java decides what happens with it on the device, and it seeds rather
-# than enforces: written on a clean install, left alone afterwards. Rebuilding
-# the menu by hand is the kind of thing you want to keep once you have done it.
+# than enforces: written on a clean install, left alone afterwards.
 if [ -d "$SELF_DIR/userdata" ]; then
   echo "==> Bundling userdata from $SELF_DIR/userdata"
   mkdir -p "$SRC/userdata"
@@ -357,11 +279,9 @@ fi
 cd "$SRC/tools/depends"
 
 # --- 2. Bootstrap + configure the depends system --------------------------
-# Only reconfigure when needed: re-running ./configure rewrites
-# Makefile.include, bumping its mtime, which invalidates every native/target
-# package's .configured-* marker and triggers a full rebuild downstream.
-# Checked against DEBUG_BUILD and HOST, since $SRC/tools/depends is shared
-# across ARCH values within one checkout.
+# Only reconfigure when needed: ./configure rewrites Makefile.include, and its
+# mtime invalidates every package's .configured-* marker. Checked against
+# DEBUG_BUILD and HOST, since tools/depends is shared across ARCH values.
 if [ ! -f Makefile.include ] || ! grep -q '^DEBUG_BUILD=no$' Makefile.include \
    || ! grep -q "^HOST=$HOST\$" Makefile.include; then
   [ -f Makefile.include ] || { echo "==> Bootstrapping tools/depends"; ./bootstrap; }
@@ -377,44 +297,37 @@ if [ ! -f Makefile.include ] || ! grep -q '^DEBUG_BUILD=no$' Makefile.include \
 fi
 
 # --- 3. Native build tools -------------------------------------------------
-# cmake, ninja, python3, meson, bison, gettext, pkg-config, etc. Small/fast
-# compared to step 4.
+# cmake, ninja, python3, meson, bison, gettext, pkg-config. Fast next to step 4.
 echo "==> Building native tools"
 make -C native -j"$JOBS"
 
 # --- 4. Target dependencies -------------------------------------------------
-# curl, taglib, dav1d, gnutls, sqlite3, ... cross-compiled for $HOST. This is
-# the expensive step the ramdisk checkpointing exists to let you skip.
+# curl, taglib, dav1d, gnutls, sqlite3 and the rest, cross-compiled for $HOST.
+# The expensive step.
 #
-# EXCLUDED_DEPENDS drops samba/samba-gplv3 (matches ENABLE_SMBCLIENT=OFF) and
-# libplist/libshairplay (matches ENABLE_AIRTUNES=OFF, ENABLE_PLIST=OFF). Plain
-# `=` assignment in target/Makefile, so a command-line override wins without
-# patching the tracked Makefile.
+# EXCLUDED_DEPENDS drops samba/samba-gplv3 (ENABLE_SMBCLIENT=OFF) and
+# libplist/libshairplay (ENABLE_AIRTUNES=OFF, ENABLE_PLIST=OFF). Plain `=` in
+# target/Makefile, so an override on the command line wins.
 #
-# An override replaces the whole value rather than appending, so this must
-# also repeat the platform's own defaults. For android on 21.3 those are
-# exactly "libusb gtest" -- NOT master's set. Copying master's list here was a
-# real bug: it dropped libcdio, which 21.3 does build for android and whose
-# absence fails the Kodi configure step outright, while silently un-excluding
-# gtest and building it for nothing.
+# The override replaces the whole value, so it must repeat the platform's own
+# defaults. For android in this release those are "libusb gtest"
+# (tools/depends/target/Makefile:70-71), not master's set.
 echo "==> Building target depends"
 make -C target -j"$JOBS" \
   EXCLUDED_DEPENDS="libusb gtest samba samba-gplv3 libplist libshairplay"
 
 # --- 5. Binary addons -------------------------------------------------------
-# DISABLED, same as the master target and for the same unresolved reason:
-# tools/depends/target/binary-addons pulls from the external community catalog
-# (ADDONS_DEFINITION_DIR), not the ~50 addons curated in-repo under addons/,
-# so excluding by those names fails silently (exit 0 despite an internal cmake
-# error). The in-repo addons appear to be picked up by the main build itself.
-# Still need to find the actual trim mechanism before re-enabling.
+# DISABLED, same as master, reason not yet resolved:
+# tools/depends/target/binary-addons pulls from the external catalog
+# (ADDONS_DEFINITION_DIR), so excluding by in-repo addon names fails silently
+# (exit 0 despite an internal cmake error). Find the real trim mechanism before
+# re-enabling.
 # make -j"$JOBS" -C tools/depends/target/binary-addons ADDONS="..."
 
 # --- 6. Configure the Kodi CMake build itself ------------------------------
-# GEN=Ninja over the default "Unix Makefiles" for better parallel scheduling.
-# DEBUG_BUILD=no -> Configuration=Release -> -DCMAKE_BUILD_TYPE=Release (see
-# tools/depends/target/cmakebuildsys/Makefile). cd back to $SRC first: steps
-# 2-4 ran from $SRC/tools/depends and this target's path is relative to $SRC.
+# GEN=Ninja for parallel scheduling. DEBUG_BUILD=no becomes
+# -DCMAKE_BUILD_TYPE=Release via tools/depends/target/cmakebuildsys/Makefile.
+# cd back to $SRC: steps 2-4 ran from tools/depends.
 cd "$SRC"
 echo "==> Configuring kodi-build (Ninja, Release)"
 GEN=Ninja BUILD_DIR="$BUILD_DIR" DEBUG_BUILD=no \

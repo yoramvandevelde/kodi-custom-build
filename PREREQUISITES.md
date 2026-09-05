@@ -1,11 +1,7 @@
 # Prerequisites
 
-Steps to prepare a clean machine before running `install.sh`. Verified
-against what this project's Kodi builds actually need (cross-checked with
-upstream's own `docs/README.Android.md` for each target), not copied blind.
-
-There are two build targets and **they need different Android toolchains**.
-Step 2 below is therefore split. Everything else is shared.
+Preparing a machine to run `install.sh` by hand. The two targets need
+different Android toolchains, so step 2 is split; everything else is shared.
 
 | | `omega` (21.3-Omega release) | `master` (pinned xbmc/xbmc master) |
 |---|---|---|
@@ -22,10 +18,8 @@ Step 2 below is therefore split. Everything else is shared.
 > The `omega` target needs a build host of roughly 2024 vintage. **Ubuntu
 > 24.04 works with no workarounds.** Ubuntu 25.10 does not build it at all.
 
-Newer is actively worse here, and the reason is structural rather than
-incidental. `tools/depends/native/` compiles 2023-vintage sources with the
-**host** compiler, so the host's age is a compatibility constraint, not a
-detail:
+`tools/depends/native/` compiles 2023-era sources with the **host** compiler,
+so the host's age is a compatibility constraint:
 
 - GCC 15 defaults to C23, where `bool` is a keyword. That breaks m4's bundled
   gnulib and pkg-config's bundled glib.
@@ -33,11 +27,8 @@ detail:
   (`CURL_NETRC_OPTION` became a long) or OpenSSL 3.5 (`SSL_get_peer_certificate`
   and `EVP_PKEY_id` are gone).
 
-None of that is worth patching around; each workaround only moves the failure
-to the next package. `tools/depends/target/` is unaffected either way, since
-it builds against the pinned NDK r21e rather than anything the distro ships.
-
-The `master` target tracks a newer Kodi whose native pins are current, so it
+`tools/depends/target/` is unaffected: it builds against the pinned NDK, not
+anything the distro ships. The `master` target's native pins are current, so it
 does not have this constraint.
 
 ## 1. System packages
@@ -49,23 +40,18 @@ sudo apt install autoconf bison build-essential ccache curl openjdk-17-jdk \
   unzip zip zlib1g-dev rsync
 ```
 
-`rsync` isn't part of upstream Kodi's own prerequisites -- it's needed by
-this project's `build-kodi.sh` scripts, which sync the source tree onto tmpfs
-on every build (see the comments at the top of either script for why).
+`rsync` is this repo's requirement, not Kodi's: `build-kodi.sh` syncs the
+source tree on every build.
 
-`ccache` isn't strictly required either, but `tools/depends/configure.ac`
-auto-detects and uses it whenever it's on `PATH` (on by default, no flag
-needed), and both build scripts already point `CCACHE_DIR` at the persistent
-tmpfs cache -- skip it only if you don't want that.
+`ccache` is optional. `tools/depends/configure.ac` picks it up whenever it is
+on `PATH`, and both build scripts point `CCACHE_DIR` at the persistent cache.
 
 > [!NOTE]
 > On a 32-bit host, drop `lib32stdc++6 lib32z1 lib32z1-dev`.
 
-`openjdk-17-jdk` is named explicitly rather than `default-jdk` because "the
-default" is a per-release moving target, and newer is not better here: the
-`omega` target ships the Gradle 8.3 wrapper, which supports up to Java 20
-(Java 21 needs Gradle 8.5+). A JDK that's too new fails at the very last
-step, APK packaging, after the whole build has already run.
+`openjdk-17-jdk` by name, not `default-jdk`: `omega` ships the Gradle 8.3
+wrapper, which supports up to Java 20 (Java 21 needs Gradle 8.5+). A newer JDK
+fails at APK packaging, after the whole build has run.
 
 ```sh
 java --version     # expect 17
@@ -85,13 +71,10 @@ tools only" from [developer.android.com/studio](https://developer.android.com/st
 (the filename includes a build number that changes over time, adjust below).
 
 > [!IMPORTANT]
-> The two targets get **separate SDK roots**, and that is deliberate.
-> `tools/depends/configure.ac` picks build-tools with
-> `ls $sdk/build-tools | sort -V | tail -n 1`, i.e. always the newest one
-> installed, with no way to ask for an older one. Putting both targets'
-> build-tools in one root would silently hand the omega build master's
-> 37.0.0 no matter what any doc says. Two roots removes the ambiguity
-> instead of trying to outsmart that sort order.
+> The two targets get **separate SDK roots**. `tools/depends/configure.ac`
+> (line 589) picks build-tools with `ls $sdk/build-tools | sort -V | tail -n 1`,
+> always the newest installed, with no way to ask for an older one. One shared
+> root hands the omega build master's 37.0.0.
 
 ### 2a. For the `omega` target (21.3-Omega)
 
@@ -125,25 +108,20 @@ cd "$HOME/android-tools-omega/android-sdk-linux/cmdline-tools/bin"
 
 > [!IMPORTANT]
 > `"cmdline-tools;latest"` in the reuse route is not optional.
-> `tools/depends/configure.ac` (line 578) requires an `sdkmanager` inside
-> the SDK root being used, at `tools/bin/`, `cmdline-tools/bin/` or
-> `cmdline-tools/latest/bin/`. Populating a root with another root's
-> sdkmanager gets you the NDK, platforms and build-tools but leaves no
-> cmdline-tools behind, so `./configure` fails on a root that otherwise
-> looks complete. `omega/build-kodi.sh` checks for this up front.
+> `tools/depends/configure.ac` (line 578) requires an `sdkmanager` inside the
+> SDK root being used, at `tools/bin/`, `cmdline-tools/bin/` or
+> `cmdline-tools/latest/bin/`. Populating a root with another root's sdkmanager
+> leaves none behind, so `./configure` fails on a root that looks complete.
 
 Why these exact versions:
 
-- **platform android-34** is not a floor, it's the value.
-  `cmake/platform/android/android.cmake` in 21.3 hardcodes `TARGET_SDK 34`,
-  which becomes gradle's `compileSdk`/`targetSdk`. A newer platform installed
-  instead does not substitute for it.
-- **NDK r21e** is what Kodi's own `docs/README.Android.md` recommends for
-  this release ("CI/CD platforms currently use r21e for build testing and
-  releases"). `omega/build-kodi.sh` passes it explicitly via
-  `--with-ndk-path`, which 21.3 **requires** -- unlike master, its configure
-  has no NDK auto-detection and hard-errors with "NDK path is required for
-  android" without it.
+- **platform android-34** is the value, not a floor.
+  `cmake/platform/android/android.cmake:7` hardcodes `TARGET_SDK 34`, which
+  becomes gradle's `compileSdk`/`targetSdk`. A newer platform does not
+  substitute for it.
+- **NDK r21e** is what this release's `docs/README.Android.md` recommends.
+  `omega/build-kodi.sh` passes it via `--with-ndk-path`, which 21.3 requires:
+  `configure.ac:567` errors with "NDK path is required for android" without it.
 
 ### 2b. For the `master` target
 
@@ -160,16 +138,14 @@ cd "$HOME/android-tools/android-sdk-linux/cmdline-tools/bin"
 ```
 
 > [!TIP]
-> Neither path needs `sudo`. (An earlier machine used `/opt/android-tools`
-> instead, which is root-owned and needs `sudo` just to create the directory
-> -- avoid that unless you have a reason for it.)
+> Neither path needs `sudo`. Keep them under `$HOME` rather than somewhere
+> root-owned like `/opt`.
 
 ## 3. Debug signing keystore
 
-Shared by both targets. This is a personal sideload build, so it reuses the
-debug keystore for release signing too (see either `build-kodi.sh`'s
-`KODI_ANDROID_*` defaults). Generate one if `~/.android/debug.keystore`
-doesn't already exist:
+Shared by both targets. A personal sideload build, so the debug keystore is
+reused for release signing (see `build-kodi.sh`'s `KODI_ANDROID_*` defaults).
+Generate one if `~/.android/debug.keystore` does not exist:
 
 ```sh
 keytool -genkey -keystore ~/.android/debug.keystore -v \
@@ -178,16 +154,13 @@ keytool -genkey -keystore ~/.android/debug.keystore -v \
   -validity 10000
 ```
 
-If it prints an "already exists" error, that's fine -- it means this step is
-already done.
+An "already exists" error means this step is done.
 
 ## 4. (Optional) SDK/NDK/tarballs paths
 
 Each `build-kodi.sh` defaults `NDK_SDK` to its own root (step 2a/2b) and both
-share `TARBALLS` at `$HOME/android-tools/xbmc-tarballs`. Sharing the tarball
-cache is safe: it's purely a download cache of upstream dependency tarballs
-keyed by filename+version, so two Kodi versions wanting different dependency
-versions just means both sets live there.
+share `TARBALLS` at `$HOME/android-tools/xbmc-tarballs`. Sharing is safe: it is
+a download cache keyed by filename+version, so both targets' sets coexist.
 
 Only override if you installed things elsewhere:
 
@@ -200,10 +173,9 @@ NDK isn't at `$NDK_SDK/ndk/21.4.7075529`.
 
 ## 5. (Optional) tmpfs build cache
 
-`scripts/restore-buildcache.sh` mounts a tmpfs and needs root to do so
-(`mount`). If you don't want a RAM-backed build (slower, but no root needed
-and no RAM budget to plan around), skip it and adjust `RAMDIR` in the
-relevant `build-kodi.sh` to point at a plain directory on disk instead.
+`scripts/restore-buildcache.sh` mounts a tmpfs, which needs root. To build on
+disk instead, skip it and point `RAMDIR` in `build-kodi.sh` at a plain
+directory.
 
 The ramdisk holds **one target at a time**, with a separate backup dir per
 target (`/home/yoram/build-cache-backup-{omega,master}`). Switching targets:

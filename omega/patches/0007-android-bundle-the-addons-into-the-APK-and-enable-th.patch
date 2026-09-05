@@ -1,0 +1,108 @@
+From f7ca4a653a1bc7aa22c31a7a93730b90ca01ab29 Mon Sep 17 00:00:00 2001
+From: Yoram van de Velde <yoortje@gmail.com>
+Date: Sat, 5 Sep 2026 22:46:35 +0200
+Subject: [PATCH] android: bundle the addons into the APK and enable them
+
+The APK shipped without the skin: build-kodi.sh unpacked the addons into the
+source tree's addons/, and nothing globs that directory. Files reach the APK
+through install_data (the explicit lists in cmake/installdata/*/*.txt),
+XBT_FILES (copy_skin_to_buildtree, for the SKINS list that the top-level
+CMakeLists.txt hardcodes to skin.estuary), or add_bundle_file. None of the
+three looked there.
+
+On the device that showed as Settings reporting the skin as None, since patch
+0006 seeds lookandfeel.skin to an addon that was not installed.
+
+Two things are needed, and shipping the files is only the first. The addons go
+into the bundle under addons/, from bundled-addons/ rather than through the
+installdata filelist, because copy_file_to_buildtree() drops .xbt among others
+and a skin built by the addon repo ships its textures pre-packed. And their ids
+go into system/addon-manifest.xml, because CAddonDatabase::SyncInstalled()
+inserts anything not listed there with enabled=0, no matter where it lives.
+---
+ cmake/scripts/android/Install.cmake | 69 +++++++++++++++++++++++++++++
+ 1 file changed, 69 insertions(+)
+
+diff --git a/cmake/scripts/android/Install.cmake b/cmake/scripts/android/Install.cmake
+index 6fcf3f4..a8a7fc0 100644
+--- a/cmake/scripts/android/Install.cmake
++++ b/cmake/scripts/android/Install.cmake
+@@ -130,6 +130,75 @@ function(add_bundle_file file destination relative)
+   endif()
+ endfunction()
+ 
++# The addons this build ships: the skin and everything it depends on.
++# build-kodi.sh unpacks them into bundled-addons/ before configuring.
++#
++# Not through cmake/installdata/common/addons.txt, where an addon would normally
++# be listed: copy_file_to_buildtree() (cmake/scripts/common/Macros.cmake:212)
++# skips every file matching (Makefile|.in|.xbt|.so|.dylib|.gitignore), and a
++# skin built by the addon repo ships its textures pre-packed as
++# media/Textures.xbt. That route installs a skin with no textures.
++#
++# One add_bundle_file() per addon directory, not per file: it emits a
++# file(COPY), which is recursive when handed a directory. An addon is a
++# directory with an addon.xml, so a half-unpacked one is skipped.
++#
++# Sits above the install_data loop because it takes an entry out of that list.
++file(GLOB BUNDLED_ADDONS ${CMAKE_SOURCE_DIR}/bundled-addons/*)
++set(bundled_addon_ids "")
++foreach(addon ${BUNDLED_ADDONS})
++  if(NOT EXISTS ${addon}/addon.xml)
++    continue()
++  endif()
++  add_bundle_file(${addon} ${datarootdir}/${APP_NAME_LC}/addons
++                  ${CMAKE_SOURCE_DIR}/bundled-addons)
++  get_filename_component(addon_id ${addon} NAME)
++  list(APPEND bundled_addon_ids ${addon_id})
++endforeach()
++
++list(LENGTH bundled_addon_ids bundled_addon_count)
++if(bundled_addon_count EQUAL 0)
++  message(WARNING "No addons in ${CMAKE_SOURCE_DIR}/bundled-addons. The APK "
++                  "will ship without the skin; build-kodi.sh puts them there.")
++else()
++  message(STATUS "Bundling ${bundled_addon_count} addon(s) from bundled-addons/")
++
++  # Shipping the files is not enough. CAddonDatabase::SyncInstalled()
++  # (xbmc/addons/AddonDatabase.cpp:420) inserts a newly discovered addon with
++  # enabled=0 unless its id is in system/addon-manifest.xml.
++  #
++  # optional="true", not a plain entry: a plain one is forced back to enabled=1
++  # on every start and makes CAddonMgr::Init() refuse to start when the addon is
++  # missing or disabled. Optional is enabled the first time it is seen and left
++  # alone after, so turning one off on the device sticks.
++  file(READ ${CMAKE_SOURCE_DIR}/system/addon-manifest.xml bundled_manifest)
++  if(NOT bundled_manifest MATCHES "</addons>")
++    message(FATAL_ERROR "system/addon-manifest.xml has no </addons> to insert "
++                        "before; the bundled addons would ship disabled.")
++  endif()
++  set(bundled_manifest_entries "")
++  foreach(addon_id ${bundled_addon_ids})
++    string(APPEND bundled_manifest_entries
++           "  <addon optional=\"true\">${addon_id}</addon>\n")
++  endforeach()
++  string(REPLACE "</addons>" "${bundled_manifest_entries}</addons>"
++         bundled_manifest "${bundled_manifest}")
++  file(WRITE ${CMAKE_BINARY_DIR}/bundled-addons-manifest/addon-manifest.xml
++       "${bundled_manifest}")
++
++  # Ours replaces the tracked manifest. Removed from install_data rather than
++  # copied over it: file(COPY) skips a file whose destination already has the
++  # same timestamp, so which of the two survived would be luck.
++  if(NOT "system/addon-manifest.xml" IN_LIST install_data)
++    message(FATAL_ERROR "system/addon-manifest.xml is not in install_data; "
++                        "find where the manifest ships from before going on.")
++  endif()
++  list(REMOVE_ITEM install_data system/addon-manifest.xml)
++  add_bundle_file(${CMAKE_BINARY_DIR}/bundled-addons-manifest/addon-manifest.xml
++                  ${datarootdir}/${APP_NAME_LC}/system
++                  ${CMAKE_BINARY_DIR}/bundled-addons-manifest)
++endif()
++
+ # Copy files into prefix
+ foreach(file IN LISTS XBT_FILES install_data)
+   string(REPLACE "${CMAKE_BINARY_DIR}/" "" file ${file})
+-- 
+2.55.0
+

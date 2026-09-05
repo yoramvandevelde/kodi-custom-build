@@ -13,11 +13,9 @@
 #   FORGEJO_TOKEN  a token with write:package
 #   APK_PACKAGE    package name (default kodi-apk)
 #
-# The KODI_* values are baked into advancedsettings.xml and sources.xml, so
-# they decide which library the resulting APK talks to. Building the household
-# streamer's APK against the play library would move the TV onto the test
-# database, and the first film someone tried to play would be how you found
-# out.
+# The KODI_* values are baked into advancedsettings.xml and sources.xml, so they
+# decide which library the resulting APK talks to. Get them wrong and the device
+# silently ends up on the wrong database.
 set -euo pipefail
 
 REPO_URL="${REPO_URL:-https://github.com/yoramvandevelde/kodi-custom-build.git}"
@@ -34,8 +32,7 @@ for var in KODI_DB_HOST KODI_DB_PORT KODI_DB_USER KODI_DB_PASS KODI_WEBDAV_SOURC
   fi
 done
 
-# Checked here as well as in build-kodi.sh, because here it costs a second and
-# there it costs a clone first. A build that cannot sign is not worth starting.
+# Checked here too: there it costs a clone first.
 KEYSTORE="${KODI_ANDROID_STORE_FILE:-$HOME/.android/debug.keystore}"
 if [ ! -f "$KEYSTORE" ]; then
   echo "No keystore at $KEYSTORE." >&2
@@ -52,8 +49,7 @@ rm -rf kodi-custom-build
 git clone --branch "$REPO_REF" --depth 1 "$REPO_URL" kodi-custom-build
 cd kodi-custom-build
 
-# Written at run time rather than mounted, so no credential is ever on disk
-# outside this container and none of it can end up in an image layer.
+# Written at run time, not mounted: no credential lands in an image layer.
 umask 077
 cat > scripts/kodi-env.sh <<ENV
 export ARCH=$ARCH
@@ -67,17 +63,13 @@ umask 022
 # shellcheck disable=SC1091
 . scripts/kodi-env.sh
 
-# install.sh clones Kodi at the pinned ref, applies the patch series, and ends
-# by invoking omega/build-kodi.sh itself with SOURCE_REPO set. Calling the
-# build script separately afterwards would build a second time, against the
-# wrong tree.
+# install.sh ends by invoking omega/build-kodi.sh itself with SOURCE_REPO set,
+# so do not call the build script again here.
 echo "==> Clone, patch and build"
 ./install.sh omega "$WORK/xbmc-omega"
 
-# Reported rather than measured by hand, because by the time a Job is worth
-# looking at its pod is Succeeded and kubectl exec is refused, so the number
-# can only be caught while the build runs. It is also the first thing worth
-# knowing about a build that failed: whether it simply ran out of room.
+# Printed because the pod is gone by the time anyone looks, and "ran out of
+# room" is the first thing worth ruling out on a failed build.
 echo "==> Disk"
 df -h "$WORK"
 du -sh "$WORK"/* 2>/dev/null | sort -h | tail -5
@@ -89,9 +81,8 @@ apk=$(find "$WORK" -name '*.apk' -type f -printf '%T@ %p\n' | sort -rn | head -1
 version="$(date +%Y%m%d-%H%M%S)"
 name="kodi-omega-$ARCH-$version.apk"
 
-# The volume is optional now that the APK can be published. Keeping it while
-# both exist is deliberate: an upload that fails after an hour of building
-# should not be the only copy that ever existed.
+# The volume is optional now the APK can be published, but kept: a failed upload
+# should not be the only copy.
 if [ -d "$OUT_DIR" ]; then
   cp -v "$apk" "$OUT_DIR/$name"
   sha256sum "$OUT_DIR/$name"
@@ -104,9 +95,8 @@ if [ -n "${FORGEJO_TOKEN:-}" ]; then
   url="$FORGEJO_URL/api/packages/$FORGEJO_OWNER/generic/$package/$version/$name"
 
   echo "==> Publishing to $url"
-  # --fail-with-body so a rejection shows what the server said rather than just
-  # a status code, and three tries because losing an hour of build to one
-  # dropped connection is not worth the simplicity.
+  # --fail-with-body to see what the server said. Retried because one dropped
+  # connection would otherwise discard an hour of build.
   for attempt in 1 2 3; do
     if curl --fail-with-body -sS -X PUT \
          -H "Authorization: token $FORGEJO_TOKEN" \

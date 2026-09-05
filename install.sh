@@ -8,27 +8,20 @@
 #   ./install.sh omega [target-dir]
 #   ./install.sh master [target-dir]
 #
-# target-dir defaults to ./xbmc-<target>. Re-running with an existing
-# target-dir reuses that checkout instead of re-cloning (patches are applied
-# via `git am`, so re-running against an already-patched checkout will fail
-# loudly on the second `git am` -- that's deliberate, not a bug: it means you
-# already have a patched tree, go straight to <target>/build-kodi.sh instead,
-# or remove target-dir to start clean).
+# target-dir defaults to ./xbmc-<target>. An existing target-dir is reused, so
+# a second run fails on `git am` against an already-patched tree. Remove
+# target-dir to start clean, or run <target>/build-kodi.sh directly.
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 XBMC_UPSTREAM="https://github.com/xbmc/xbmc.git"
 
 # --- Target selection ------------------------------------------------------
-# Both targets are pinned to an explicit ref, never to a moving branch. That
-# matters more than it looks: Kodi's library schema version is compiled in
-# (CVideoDatabase::GetSchemaVersion) and the MySQL database is literally named
-# after it (MyVideos131, MyVideos148, ...). A Kodi that finds no database at
-# its own schema version COPIES the nearest older one and migrates the copy,
-# one-way. So an unpinned build that drifts to a newer commit can silently
-# fork the shared library into a new database that the devices still running
-# the old build can no longer see. Pinning is what keeps every instance
-# pointed at the same schema on purpose rather than by luck.
+# Pinned to an explicit ref, never a branch. The library schema version is
+# compiled in (CVideoDatabase::GetSchemaVersion) and the MySQL database is named
+# after it (MyVideos131). A Kodi that finds no database at its own version
+# copies the nearest older one and migrates the copy, one way, so a build that
+# drifts forks the shared library away from every device still on the old one.
 TARGET="${1:-}"
 case "$TARGET" in
   omega)
@@ -36,11 +29,10 @@ case "$TARGET" in
     XBMC_REF="21.3-Omega"
     ;;
   master)
-    # Untagged xbmc/xbmc master, pinned to the commit this repo was last built
-    # and validated against. Schema: MyVideos148 / MyMusic84 -- a schema that
-    # exists in no released Kodi, which is exactly why nothing off-the-shelf
-    # (distro package, AppImage, official APK) can share a library with it.
-    # Bump deliberately, never casually, and rebuild every device together.
+    # Untagged xbmc/xbmc master, pinned to the last commit built and validated.
+    # Schema MyVideos148 / MyMusic84 exists in no released Kodi, so nothing
+    # off-the-shelf can share a library with it. Bumping means rebuilding every
+    # device together.
     XBMC_REF="62ff01403b"
     ;;
   ""|-h|--help)
@@ -64,9 +56,7 @@ fi
 
 XBMC_DIR="${2:-$SELF_DIR/xbmc-$TARGET}"
 
-# Separate checkout per target by default. They sit at different refs with
-# different patches applied, so sharing one directory would mean re-cloning
-# (or hard-resetting) on every switch.
+# Separate checkout per target: different refs, different patches.
 if [ ! -d "$XBMC_DIR/.git" ]; then
   echo "==> Cloning $XBMC_UPSTREAM into $XBMC_DIR"
   git clone "$XBMC_UPSTREAM" "$XBMC_DIR"
@@ -75,22 +65,13 @@ else
 fi
 
 echo "==> Checking out pinned ref $XBMC_REF"
-# Detached on purpose: this is a build input, not a branch to develop on. A
-# named branch here would invite `git pull` and quietly undo the pin.
+# Detached on purpose: a named branch invites `git pull`, which undoes the pin.
 git -C "$XBMC_DIR" fetch --tags origin
 git -C "$XBMC_DIR" checkout --detach "$XBMC_REF"
 
-# git am creates commits, so it needs a committer identity, and a freshly
-# installed machine has none configured -- it fails with "Committer identity
-# unknown" before applying anything. Set one, but ONLY in this clone (never
-# --global: this is a disposable build artifact, not a reason to touch the
-# machine's git config), and only when nothing is configured anywhere, so a
-# machine that already has a real identity keeps using it.
-#
-# This identity is the committer, not the author: `git am` preserves each
-# patch's original From: line, so authorship survives regardless of what's
-# set here. Override with GIT_COMMITTER_NAME / GIT_COMMITTER_EMAIL if you
-# want these commits attributed to you instead.
+# git am needs a committer identity and a fresh machine has none. Set locally,
+# never --global, and only when nothing is configured. Committer only: `git am`
+# keeps each patch's From: line.
 if ! git -C "$XBMC_DIR" config user.email >/dev/null 2>&1; then
   echo "==> No git identity configured; setting a local one for this clone"
   git -C "$XBMC_DIR" config user.name "${GIT_COMMITTER_NAME:-kodi-custom-build}"
