@@ -1,17 +1,14 @@
 #!/usr/bin/env bash
 # Verify the scanner's userdata templates still match the streamer's.
 #
-# The streamer's templates live inside omega/patches/0002-*.patch (they are
-# added by that patch, so they only exist in a patched checkout), and the
-# scanner keeps its own copies under scanner/userdata/. Two copies of something
-# that has to stay identical will drift eventually, hence this check.
+# The streamer's live inside omega/patches/0002-*.patch, the scanner's under
+# scanner/userdata/. Two copies of something that has to stay identical drift.
 #
-# It matters most for sources.xml. Kodi records the source path in the `path`
-# table of the shared library, so if the two sides render even slightly
-# different URLs -- a trailing slash, a different credential form -- Kodi treats
-# them as two separate sources and you end up with every title twice in one
-# library. advancedsettings.xml is checked for the database block only: the
-# scanner deliberately adds settings the streamer has no use for.
+# sources.xml is the one that matters: Kodi records the source path in the
+# shared library's `path` table, so two slightly different URLs (a trailing
+# slash, another credential form) become two sources and every title appears
+# twice. advancedsettings.xml is compared on the database block only, since the
+# scanner adds settings the streamer has no use for.
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -23,9 +20,8 @@ if [ -z "$PATCH" ]; then
   exit 1
 fi
 
-# Pull a file's post-patch content out of the patch. These files are added by
-# the patch, so every content line is an addition and this is exact rather than
-# a heuristic.
+# These files are added by the patch, so every content line is an addition and
+# extracting them this way is exact.
 extract() {
   sed -n "\|diff --git a/$1|,/^diff --git/p" "$PATCH" \
     | sed -n '/^+++/,$p' | grep '^+' | grep -v '^+++' | sed 's/^+//'

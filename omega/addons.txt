@@ -1,18 +1,12 @@
-# Addons bundled into the APK, on top of the 54 that Kodi ships itself.
+# The addons this build ships with, on top of the ones Kodi installs itself.
+# Fetched from mirrors.kodi.tv by build-kodi.sh.
 #
-# Why bundle rather than install on the device: an addon dropped into a
-# profile is registered but left disabled (enabled=0 in Addons33.db), and Kodi
-# does not resolve its dependencies for it either. Selecting the skin then
-# loads a broken interface. Addons that ship in the source tree's addons/
-# become system addons instead, which Kodi enables itself.
+# The whole dependency set, not just the skin: skin.arctic.zephyr.mod requires
+# six addons directly and plugin.video.themoviedb.helper pulls in the
+# script.module.* row. Kodi fetches none of them on its own.
 #
-# Why the whole list rather than just the skin: skin.arctic.zephyr.mod requires
-# six addons directly, and plugin.video.themoviedb.helper drags in the whole
-# script.module.* row behind it. Kodi fetches none of them on its own.
-#
-# Versions are what the streamer ran on 2026-09-05, not "latest". A skin and
-# its dependencies that are known to work together are worth more than being
-# current, and this is rebuilt a few times a year at most.
+# Versions are what the streamer ran on 2026-09-05, not "latest". A set that is
+# known to work together beats a current one; this is rebuilt a few times a year.
 #
 # id                                    version
 skin.arctic.zephyr.mod                  3.0.3

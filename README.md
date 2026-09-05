@@ -1,8 +1,11 @@
 # kodi-custom-build
 
-A personal Kodi Android build for one device (Google TV streamer,
-32-bit/armv7a). Clone, run one script, get a working install: no manual
-step of dropping `advancedsettings.xml` onto the device by hand.
+A personal Kodi Android build for a Google TV Streamer 4K. One install and the
+device is configured: no dropping `advancedsettings.xml` on it by hand.
+
+Built for **armv7a**, not arm64. The hardware is 64-bit capable but the Android
+build shipped for it is not, so `ARCH=armv7a` has to be set explicitly; the
+build scripts default to `arm64`.
 
 ## Two build targets
 
@@ -12,13 +15,11 @@ step of dropping `advancedsettings.xml` onto the device by hand.
 ```
 
 Each has its own patch series, build script and Android toolchain (see
-[PREREQUISITES.md](PREREQUISITES.md)). They're pinned to explicit refs, never
-a branch, because Kodi's library schema is compiled into the binary and the
-database is named after it (`MyVideos131`, `MyVideos148`). If it doesn't find
-a database at its own schema version, Kodi silently copies the nearest older
-one and migrates the copy, one-way. Building against a moving branch risks
-forking the shared library without any error. Migrations only run upward,
-so treat a downgrade as "rescan", not "revert".
+[PREREQUISITES.md](PREREQUISITES.md)). Pinned to explicit refs, never a branch:
+the library schema is compiled into the binary and the database is named after
+it. A Kodi that finds no database at its own version copies the nearest older
+one and migrates the copy, one way, so a drifting build forks the shared
+library silently. Migrations only run upward, so a downgrade means a rescan.
 
 - **`omega`** = `21.3-Omega`. Schema 131/83, same as any official Kodi build,
   so off-the-shelf Kodi (distro package, AppImage, APK) can share the library.
@@ -28,54 +29,40 @@ so treat a downgrade as "rescan", not "revert".
 
 ## Why patches, not a fork
 
-A fork needs its history kept in sync with upstream forever, and merge
-conflicts in a codebase this size fail quietly. This repo instead applies a
-handful of `.patch` files with `git am` onto a fresh, pinned `xbmc/xbmc`
-clone. If a patch stops applying, that's an explicit, loud failure, not a
-silent merge.
+A fork has to be kept in sync forever, and merge conflicts in a codebase this
+size fail quietly. This applies `.patch` files with `git am` onto a fresh,
+pinned clone instead: a patch that stops applying fails loudly.
 
 ## Approach
 
-- **No personal config or secrets committed.** Device-specific values
-  (DB credentials, WebDAV URL) live as placeholders in `.xml.in` templates,
-  resolved from required env vars at CMake-configure time. A missing value
-  is a hard build failure, never a silently-broken APK.
-- **A Splash.java hook bridges "baked into the APK" and "where Kodi actually
-  reads config".** The Android packaging step bundles resolved config as
-  read-only APK assets; nothing in Kodi copies them into the writable
-  profile dir on its own, so a small addition to the `Splash` activity does
-  it before the native engine loads.
+- **No secrets committed.** Device-specific values live as placeholders in
+  `.xml.in` templates, resolved from env vars at CMake-configure time. A
+  missing value fails the build.
+- **A `Splash.java` hook puts config where Kodi reads it.** The packaging step
+  bundles resolved config as read-only APK assets, and nothing in Kodi copies
+  those into the writable profile, so the `Splash` activity does it before the
+  native engine loads.
 - **Write policy differs per file.** `advancedsettings.xml` is refreshed on
-  every start (repo is source of truth). `sources.xml` / `mediasources.xml`
-  are written only if missing, so sources added later via the GUI survive a
-  rebuild. This means a bad seed value (typo, wrong URL scheme) only
-  self-corrects via a fresh install, not an APK update, that's intentional:
-  fixing a bad out-of-the-box config and doing a fresh install are the same
-  action here.
+  every start. `sources.xml` / `mediasources.xml` are written only if missing,
+  so sources added through the GUI survive a rebuild. A bad seed value
+  therefore only corrects on a fresh install, not on an update.
 
 ## What changed, concretely
 
-Two patches per target, same two changes, each rebased onto its own ref:
+See `<target>/patches/`. Each patch's commit message says what it does and why;
+that is the authoritative list, not a copy of it here.
 
-1. **Conditional `libshairplay.so` packaging.** Only bundled when the
-   Shairplay CMake target actually exists, instead of unconditionally.
-2. **Bake per-device userdata config into the APK.** `advancedsettings.xml`,
-   `mediasources.xml`, `sources.xml` templated, resolved from env vars,
-   bundled as assets, synced by `Splash.java` (see write policy above).
-
-Not interchangeable between targets: upstream renamed the Shairplay CMake
-target after 21.3, so patch 1 differs between them.
+The series are not interchangeable between targets. Upstream renamed the
+Shairplay CMake target after 21.3, among other things.
 
 ## The scanner
 
-The streamer is a client and can't be relied on to scan a large WebDAV
-source in the background. Library scanning instead lives in
-[`scanner/`](scanner/README.md): a disposable Alpine image that runs once a
-night as a Kubernetes Job, updates the shared library, and exits. It builds
-nothing, it runs stock `apk add kodi`, possible because the streamer is on
-released Kodi (21.x speaks `MyVideos131`). This repo produces the image and
-its build pipeline; the manifests that run it live in the GitOps repo,
-against the runtime contract documented there.
+The streamer cannot be relied on to scan a large WebDAV source in the
+background, so scanning lives in [`scanner/`](scanner/README.md): a disposable
+Alpine image that runs nightly as a Kubernetes Job and exits. It builds
+nothing and runs stock `apk add kodi`, which works because the streamer is on
+a released Kodi. This repo produces the image; the manifests that run it live
+in the GitOps repo.
 
 ## Layout
 
@@ -84,10 +71,10 @@ against the runtime contract documented there.
 - `omega/`, `master/`: per-target `build-kodi.sh` and `patches/`.
 - `scanner/`: the nightly library-scanner image (`Dockerfile`,
   `entrypoint.sh`, userdata templates).
-- `scripts/restore-buildcache.sh` / `save-buildcache.sh`: mount/restore and
-  save/backup the tmpfs build cache across reboots. Target-aware.
+- `scripts/restore-buildcache.sh` / `save-buildcache.sh`: save and restore the
+  tmpfs build cache across reboots. Target-aware.
 - `scripts/kodi-env.sh.example`: template for per-device config. Copy to
-  `kodi-env.sh` (gitignored), fill in real values. Shared by both targets.
+  `kodi-env.sh` (gitignored) and fill in real values.
 
 ## Usage
 
@@ -118,12 +105,12 @@ After committing changes in a working xbmc/xbmc checkout:
 git format-patch -N --output-directory /path/to/kodi-custom-build/<target>/patches HEAD
 ```
 
-`N` = how many recent commits to export. Commits made without a signing key
-can be signed at apply time instead:
+`N` = how many recent commits to export. Commits made without a signing key can
+be signed at apply time:
 
 ```sh
 git am --gpg-sign <target>/patches/*.patch
 ```
 
-To move a series onto a different ref, `git am -3` it there and resolve
-conflicts, that's how `omega/patches` was produced from `master/patches`.
+To move a series onto a different ref, `git am -3` it there and resolve the
+conflicts.
