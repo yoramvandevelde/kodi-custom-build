@@ -1,0 +1,274 @@
+From 886c0267dc030cf0ad084917a894a2d4b26e1cab Mon Sep 17 00:00:00 2001
+From: Yoram van de Velde <yoortje@gmail.com>
+Date: Sat, 5 Sep 2026 12:54:58 +0200
+Subject: [PATCH] android: seed the skin's configuration on a clean install
+
+The APK now ships the skin and its dependencies, but a fresh profile still
+loads Estuary with a default menu, so the twenty minutes of clicking came back
+anyway. This puts that configuration in place too.
+
+Two pieces. addon_data holds the skin's own settings and the skinshortcuts
+menu, and is copied per file, only where nothing exists yet: a menu that gained
+an entry since this build was made still arrives, and anything already
+configured on the device is untouched. And lookandfeel.skin is seeded, because
+a bundled skin that nothing selects is just an unused directory.
+
+Seeding is not enforcing, and the distinction is the point. These are a
+starting position, so changing them on the device has to stick. Absent, or
+present but still carrying default="true", counts as never chosen; Kodi writes
+that attribute whenever a value equals the built-in default, so a deliberate
+choice of the default is indistinguishable from no choice at all. On a clean
+install, which is the only case this exists for, that does not arise.
+
+The write path that enforceGuiSettings had inline moves into a method both use.
+---
+ cmake/scripts/android/Install.cmake           |  14 ++
+ .../android/packaging/xbmc/src/Splash.java.in | 190 ++++++++++++++++--
+ 2 files changed, 185 insertions(+), 19 deletions(-)
+
+diff --git a/cmake/scripts/android/Install.cmake b/cmake/scripts/android/Install.cmake
+index a9c9bf8..6fcf3f4 100644
+--- a/cmake/scripts/android/Install.cmake
++++ b/cmake/scripts/android/Install.cmake
+@@ -182,6 +182,20 @@ foreach(seedfile mediasources.xml sources.xml)
+                   ${datarootdir}/${APP_NAME_LC} ${CMAKE_BINARY_DIR})
+ endforeach()
+ 
++# The skin's own settings and the skinshortcuts menu, bundled as they are.
++# Nothing in them is device-specific, so no configure_file, and there are
++# fourteen files whose names come from menu ids, so a glob rather than a list
++# that goes stale the first time a menu entry is added.
++#
++# Whether any of this reaches the profile is Splash.java's decision, and it
++# seeds: written on a clean install, untouched afterwards.
++file(GLOB_RECURSE SEED_ADDON_DATA RELATIVE ${CMAKE_SOURCE_DIR}
++     ${CMAKE_SOURCE_DIR}/userdata/addon_data/*)
++foreach(seedfile ${SEED_ADDON_DATA})
++  add_bundle_file(${CMAKE_SOURCE_DIR}/${seedfile}
++                  ${datarootdir}/${APP_NAME_LC} ${CMAKE_SOURCE_DIR})
++endforeach()
++
+ # Main targets from Makefile.in
+ if(CPU MATCHES i686)
+   set(CPU x86)
+diff --git a/tools/android/packaging/xbmc/src/Splash.java.in b/tools/android/packaging/xbmc/src/Splash.java.in
+index aa12052..685aaeb 100644
+--- a/tools/android/packaging/xbmc/src/Splash.java.in
++++ b/tools/android/packaging/xbmc/src/Splash.java.in
+@@ -668,9 +668,154 @@ public class Splash extends Activity
+     syncSeedUserdataFile("advancedsettings.xml", true);
+     syncSeedUserdataFile("mediasources.xml", false);
+     syncSeedUserdataFile("sources.xml", false);
++    syncSeedUserdataDir("addon_data");
++    seedGuiSettings();
+     enforceGuiSettings();
+   }
+ 
++  /**
++   * Copies a bundled directory tree into the profile, but only where nothing is
++   * there yet. Used for addon_data, which holds the skin's settings and the
++   * skinshortcuts menu: the part of a fresh device that takes twenty minutes of
++   * clicking to recreate.
++   *
++   * Per file rather than per directory, so a menu that gains an entry after
++   * this build was made still arrives, while anything already configured on the
++   * device is left exactly as it is.
++   */
++  private void syncSeedUserdataDir(String name)
++  {
++    File src = new File(fXbmcHome, "assets/userdata/" + name);
++    if (!src.isDirectory())
++    {
++      Log.w(TAG, "Bundled " + name + " missing at " + src);
++      return;
++    }
++    seedTree(src, new File(getUserdataDir(), name));
++  }
++
++  private void seedTree(File src, File dest)
++  {
++    File[] entries = src.listFiles();
++    if (entries == null)
++      return;
++
++    for (File entry : entries)
++    {
++      File target = new File(dest, entry.getName());
++      if (entry.isDirectory())
++      {
++        seedTree(entry, target);
++        continue;
++      }
++      if (target.exists())
++        continue;
++
++      target.getParentFile().mkdirs();
++      try (InputStream in = new FileInputStream(entry);
++           FileOutputStream out = new FileOutputStream(target))
++      {
++        byte[] buf = new byte[4096];
++        int n;
++        while ((n = in.read(buf)) > 0)
++          out.write(buf, 0, n);
++        out.getFD().sync();
++        Log.i(TAG, "Seeded " + target);
++      }
++      catch (IOException e)
++      {
++        Log.e(TAG, "Failed seeding " + target + ": " + e.getMessage());
++      }
++    }
++  }
++
++  /**
++   * Settings written only when the profile has never had an opinion about them.
++   *
++   * Separate from ENFORCED_GUI_SETTINGS because the intent is the opposite:
++   * these are a starting point, not a rule, and changing them on the device has
++   * to stick.
++   *
++   * "Never had an opinion" is read as absent, or present but still carrying
++   * default="true". Kodi writes that attribute whenever a value equals the
++   * built-in default, so a deliberate choice of the default looks identical to
++   * never having chosen. On a clean install, which is the only case this exists
++   * for, that distinction does not arise.
++   */
++  private static final String[][] SEEDED_GUI_SETTINGS = {
++    // The bundled skin, which is a system addon in this build and so is already
++    // enabled by the time this runs. Without this line it sits there unused
++    // while Estuary loads.
++    { "lookandfeel.skin", "skin.arctic.zephyr.mod" },
++  };
++
++  private void seedGuiSettings()
++  {
++    File destDir = getUserdataDir();
++    destDir.mkdirs();
++    File dest = new File(destDir, "guisettings.xml");
++
++    try
++    {
++      DocumentBuilder builder = DocumentBuilderFactory.newInstance().newDocumentBuilder();
++      Document doc;
++      if (dest.exists())
++        doc = builder.parse(dest);
++      else
++      {
++        doc = builder.newDocument();
++        Element created = doc.createElement("settings");
++        created.setAttribute("version", "2");
++        doc.appendChild(created);
++      }
++
++      Element root = doc.getDocumentElement();
++      if (root == null || !"settings".equals(root.getNodeName()))
++      {
++        Log.e(TAG, "guisettings.xml has no <settings> root, leaving it alone");
++        return;
++      }
++
++      boolean changed = false;
++      for (String[] pair : SEEDED_GUI_SETTINGS)
++        changed |= seedGuiSetting(doc, root, pair[0], pair[1]);
++
++      if (changed)
++        writeGuiSettings(doc, destDir, dest);
++    }
++    catch (Exception e)
++    {
++      Log.e(TAG, "Could not seed GUI settings: " + e.getMessage());
++    }
++  }
++
++  /** @return true if the document was changed */
++  private boolean seedGuiSetting(Document doc, Element root, String id, String value)
++  {
++    NodeList settings = root.getElementsByTagName("setting");
++    for (int i = 0; i < settings.getLength(); i++)
++    {
++      Element setting = (Element) settings.item(i);
++      if (!id.equals(setting.getAttribute("id")))
++        continue;
++
++      // Present and chosen: leave it. Present but still the default: treat it
++      // as unchosen and seed over it.
++      if (!setting.hasAttribute("default"))
++        return false;
++
++      setting.removeAttribute("default");
++      setting.setTextContent(value);
++      return true;
++    }
++
++    Element added = doc.createElement("setting");
++    added.setAttribute("id", id);
++    added.setTextContent(value);
++    root.appendChild(added);
++    return true;
++  }
++
+   /**
+    * guisettings.xml is neither of the two policies above. Overwriting it
+    * wholesale would discard everything configured from the sofa; seeding it
+@@ -724,25 +869,8 @@ public class Splash extends Activity
+       for (String[] pair : ENFORCED_GUI_SETTINGS)
+         changed |= forceGuiSetting(doc, root, pair[0], pair[1]);
+ 
+-      if (!changed)
+-        return;
+-
+-      File tmp = new File(destDir, "guisettings.xml.tmp");
+-      Transformer transformer = TransformerFactory.newInstance().newTransformer();
+-      transformer.setOutputProperty(OutputKeys.INDENT, "yes");
+-      try (FileOutputStream out = new FileOutputStream(tmp))
+-      {
+-        transformer.transform(new DOMSource(doc), new StreamResult(out));
+-        out.getFD().sync();
+-      }
+-
+-      if (!tmp.renameTo(dest))
+-      {
+-        Log.e(TAG, "Failed to atomically install guisettings.xml");
+-        tmp.delete();
+-      }
+-      else
+-        Log.i(TAG, "Enforced GUI settings in " + dest);
++      if (changed)
++        writeGuiSettings(doc, destDir, dest);
+     }
+     catch (Exception e)
+     {
+@@ -752,6 +880,30 @@ public class Splash extends Activity
+     }
+   }
+ 
++  /**
++   * Writes guisettings.xml back, via a temp file and an atomic rename so a boot
++   * interrupted mid-write never leaves a truncated profile behind.
++   */
++  private void writeGuiSettings(Document doc, File destDir, File dest) throws Exception
++  {
++    File tmp = new File(destDir, "guisettings.xml.tmp");
++    Transformer transformer = TransformerFactory.newInstance().newTransformer();
++    transformer.setOutputProperty(OutputKeys.INDENT, "yes");
++    try (FileOutputStream out = new FileOutputStream(tmp))
++    {
++      transformer.transform(new DOMSource(doc), new StreamResult(out));
++      out.getFD().sync();
++    }
++
++    if (!tmp.renameTo(dest))
++    {
++      Log.e(TAG, "Failed to atomically install guisettings.xml");
++      tmp.delete();
++    }
++    else
++      Log.i(TAG, "Wrote " + dest);
++  }
++
+   /**
+    * Sets one setting to a value, adding the element if it is not there.
+    *
+-- 
+2.55.0
+

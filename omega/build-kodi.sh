@@ -80,6 +80,7 @@ for var in KODI_WEBDAV_SOURCE_URL; do
   fi
 done
 
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RAMDIR="/mnt/buildram"
 SRC="$RAMDIR/src"
 DEPENDS_PREFIX="$RAMDIR/xbmc-depends"
@@ -287,6 +288,71 @@ echo "==> Syncing kodi source into $SRC"
 mkdir -p "$SRC"
 git -C "$SOURCE_REPO" ls-files -z --cached --others --exclude-standard \
   | rsync -a --files-from=- --from0 "$SOURCE_REPO/" "$SRC/"
+
+# --- 1b. Bundle the addons this build ships with ---------------------------
+# Everything under addons/ in the source tree ends up in the APK as a system
+# addon (54 of the 56 present do; only the two demo scrapers are left out), and
+# Kodi enables system addons itself. That is the whole reason for doing it here
+# rather than dropping the files into a profile: an addon placed in a profile
+# is registered with enabled=0 and stays invisible, and Kodi resolves no
+# dependencies for it either, so selecting the skin loads a broken interface.
+#
+# No filelist to edit. cmake/installdata/common/addons.txt does not mention
+# skin.estuary either, and that ships fine.
+#
+# Downloads are cached next to the build so a rerun does not refetch 60MB, and
+# an addon that is already unpacked is left alone.
+ADDON_LIST="${ADDON_LIST:-$SELF_DIR/addons.txt}"
+ADDON_CACHE="${ADDON_CACHE:-$RAMDIR/addon-zips}"
+ADDON_MIRROR="${ADDON_MIRROR:-https://mirrors.kodi.tv/addons/omega}"
+
+if [ -f "$ADDON_LIST" ]; then
+  mkdir -p "$ADDON_CACHE"
+  n=0
+  while read -r addon version _rest; do
+    case "$addon" in ''|\#*) continue ;; esac
+    [ -n "$version" ] || { echo "No version for $addon in $ADDON_LIST" >&2; exit 1; }
+
+    if [ -d "$SRC/addons/$addon" ]; then
+      continue
+    fi
+
+    zip="$ADDON_CACHE/$addon-$version.zip"
+    if [ ! -f "$zip" ]; then
+      echo "==> Fetching $addon $version"
+      # -f so a 404 fails here rather than unzipping an error page. Written to
+      # a temp name first: a half-downloaded zip in the cache would be treated
+      # as good on the next run.
+      curl -fsSL -o "$zip.part" "$ADDON_MIRROR/$addon/$addon-$version.zip" \
+        || { echo "Not on the mirror: $addon $version" >&2; rm -f "$zip.part"; exit 1; }
+      mv "$zip.part" "$zip"
+    fi
+
+    unzip -q -o "$zip" -d "$SRC/addons"
+    [ -d "$SRC/addons/$addon" ] \
+      || { echo "$zip did not unpack to addons/$addon" >&2; exit 1; }
+    n=$((n + 1))
+  done < "$ADDON_LIST"
+  echo "==> Bundled $n addon(s) from $ADDON_LIST"
+fi
+
+# --- 1c. Userdata that ships with the build --------------------------------
+# The skin's own settings and the skinshortcuts menu, which is where the twenty
+# minutes of clicking actually lives: guisettings.xml turned out to hold seven
+# non-default values, and everything else was in here.
+#
+# Copied into the source tree rather than carried in a patch, for the same
+# reason as the addons: this is data, and a patch adding fourteen XML files
+# would have to be regenerated every time one of them changes.
+#
+# Splash.java decides what happens with it on the device, and it seeds rather
+# than enforces: written on a clean install, left alone afterwards. Rebuilding
+# the menu by hand is the kind of thing you want to keep once you have done it.
+if [ -d "$SELF_DIR/userdata" ]; then
+  echo "==> Bundling userdata from $SELF_DIR/userdata"
+  mkdir -p "$SRC/userdata"
+  cp -R "$SELF_DIR/userdata/." "$SRC/userdata/"
+fi
 
 cd "$SRC/tools/depends"
 
