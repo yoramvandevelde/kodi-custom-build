@@ -28,6 +28,17 @@ for var in KODI_DB_HOST KODI_DB_PORT KODI_DB_USER KODI_DB_PASS KODI_WEBDAV_SOURC
   fi
 done
 
+# Checked here as well as in build-kodi.sh, because here it costs a second and
+# there it costs a clone first. A build that cannot sign is not worth starting.
+KEYSTORE="${KODI_ANDROID_STORE_FILE:-$HOME/.android/debug.keystore}"
+if [ ! -f "$KEYSTORE" ]; then
+  echo "No keystore at $KEYSTORE." >&2
+  echo "Mount one and point KODI_ANDROID_STORE_FILE at it. The image carries" >&2
+  echo "none on purpose: a key generated per build cannot update its own" >&2
+  echo "previous APK." >&2
+  exit 1
+fi
+
 echo "==> Source: $REPO_URL @ $REPO_REF"
 mkdir -p "$WORK"
 cd "$WORK"
