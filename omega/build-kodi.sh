@@ -336,6 +336,24 @@ if [ -f "$ADDON_LIST" ]; then
   echo "==> Bundled $n addon(s) from $ADDON_LIST"
 fi
 
+# --- 1c. Userdata that ships with the build --------------------------------
+# The skin's own settings and the skinshortcuts menu, which is where the twenty
+# minutes of clicking actually lives: guisettings.xml turned out to hold seven
+# non-default values, and everything else was in here.
+#
+# Copied into the source tree rather than carried in a patch, for the same
+# reason as the addons: this is data, and a patch adding fourteen XML files
+# would have to be regenerated every time one of them changes.
+#
+# Splash.java decides what happens with it on the device, and it seeds rather
+# than enforces: written on a clean install, left alone afterwards. Rebuilding
+# the menu by hand is the kind of thing you want to keep once you have done it.
+if [ -d "$SELF_DIR/userdata" ]; then
+  echo "==> Bundling userdata from $SELF_DIR/userdata"
+  mkdir -p "$SRC/userdata"
+  cp -R "$SELF_DIR/userdata/." "$SRC/userdata/"
+fi
+
 cd "$SRC/tools/depends"
 
 # --- 2. Bootstrap + configure the depends system --------------------------
