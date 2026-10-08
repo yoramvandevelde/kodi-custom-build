@@ -1,0 +1,34 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Yoram van de Velde <yoortje@gmail.com>
+Date: Thu, 8 Oct 2026 18:45:00 +0200
+Subject: [PATCH] android: tune the network read cache in advancedsettings
+
+Playback from the WebDAV source stutters. Kodi's default cache is small and
+only buffers the local sources it knows are slow, so any latency spike on the
+server side (disk, CPU throttling of the WebDAV pod) shows up directly as a
+stall.
+
+Enable buffering for network filesystems (buffermode 1), raise the memory
+cache to 150 MiB and read ahead more aggressively (readfactor 20). The file is
+rewritten from this template on every start (see Splash.java), so editing the
+copy on the device does not stick; the values have to live here.
+---
+ userdata/advancedsettings.xml.in | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/userdata/advancedsettings.xml.in b/userdata/advancedsettings.xml.in
+index d7e78b48c9..0000000000 100644
+--- a/userdata/advancedsettings.xml.in
++++ b/userdata/advancedsettings.xml.in
+@@ -1,4 +1,9 @@
+ <advancedsettings>
++  <cache>
++    <buffermode>1</buffermode>
++    <memorysize>157286400</memorysize>
++    <readfactor>20</readfactor>
++  </cache>
+   <videodatabase>
+     <type>mysql</type>
+     <host>@KODI_DB_HOST@</host>
+-- 
+2.55.0
